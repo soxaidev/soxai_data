@@ -19,7 +19,7 @@ maintainers = [
 description = "SOXAI Data Science Library"
 readme = "README.md"
 license = {file = "LICENSE.txt"}
-keywords = ["soxai", "data", "science"]
+keywords = ["soxai_data", "soxai-data", "soxai", "data", "science"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python"
