@@ -1,8 +1,0 @@
-setup.py
-soxai_data/__init__.py
-soxai_data/soxai_data.py
-soxai_data.egg-info/PKG-INFO
-soxai_data.egg-info/SOURCES.txt
-soxai_data.egg-info/dependency_links.txt
-soxai_data.egg-info/requires.txt
-soxai_data.egg-info/top_level.txt
