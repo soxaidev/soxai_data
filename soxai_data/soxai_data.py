@@ -178,3 +178,44 @@ class DataLoader():
         return df
     
 
+    def getDailyDataByUid(self, uid, start_time, stop_time):
+		"""
+        Retrieves daily data from the SOXAI database within the specified date range by uid.
+
+        Args:
+			uid (str): The uid to specify in the condition
+            start_date (str, optional): The start date of the data range. Defaults to '-7d'.
+            end_date (str, optional): The end date of the data range. Defaults to 'now()'.
+
+        Returns:
+            pandas.DataFrame: A DataFrame containing the retrieved data.
+
+        Raises:
+            Exception: If there is an error in querying the data.
+
+        """
+        result_list = []
+        if not uid:
+            return None
+        url = self.url + f'DailyInfoData/{uid}'
+        if start_time is None:
+            start_time = '-30d'
+        else:
+            start_time = int(pd.Timestamp(start_time).timestamp())
+        if stop_time is None:
+            stop_time = 'now()'
+        else:
+            stop_time = int(pd.Timestamp(stop_time).timestamp())
+
+        query = f"?page=0&start_time={start_time}&stop_time={stop_time}&format=json"
+
+        try:
+            timeout = httpx.Timeout(70.0)
+            response = httpx.get(url + query, headers=self.headers, timeout=timeout)
+            data = json.loads(response.json())
+            df =  pd.DataFrame(data)
+            return df
+        except Exception as e:
+            print("Error in querying the data", e)
+            return None
+
