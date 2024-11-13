@@ -164,9 +164,9 @@ class AverageDataExecutor:
 
         # 定数
         input_file = self.input_file
-        output_file_path = f'{self.output_file_path}/{start_datetime.strftime("%Y%m%d%H%M%S")}_result.csv'
+        output_file_path = f'{self.output_file_path}/{start_datetime.strftime("%Y%m%d%H%M%S")}_user_uid.csv'
         not_processed_uid_path = f'{self.output_file_path}/{start_datetime.strftime("%Y%m%d%H%M%S")}_not_processed_uid.csv'
-        failed_processed_uid_path = f'{self.output_file_path}/{start_datetime.strftime("%Y%m%d%H%M%S")}_failed_processed_uid.csv'
+        failed_processed_uid_path = f'{self.output_file_path}/{start_datetime.strftime("%Y%m%d%H%M%S")}_failed_uid.csv'
         # 取得開始日指定
         start_date = datetime.datetime(year=2022, month=3, day=1, hour=0, minute=0, second=0)
         # start_date = 0
