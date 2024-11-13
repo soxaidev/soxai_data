@@ -34,9 +34,9 @@ class InfluxDb:
         sx_data = DataLoader(token=self.api_key)
         return sx_data
 
-    def get_daily_data_by_uid(self, uid, start_date=None, end_date=None):
+    def get_daily_data_by_uid(self, uid, start_date=None, end_date=None, timeout=60.0):
         try:
-            df = self.sx_data.getDailyDataByUid(uid, start_date, end_date)
+            df = self.sx_data.getDailyDataByUid(uid, start_date, end_date, timeout)
             return df, uid
         except Exception as e:
             print(f'failed to get data from influxdb  {e}')
@@ -197,7 +197,7 @@ class AverageDataExecutor:
                     break
                 else:
                     # InfluxDBからデータを取得
-                    df, uid = influxDb.get_daily_data_by_uid(uid, start_date, None)
+                    df, uid = influxDb.get_daily_data_by_uid(uid, start_date, None, 60.0)
                     if df is None:
                         # 取得に失敗した場合、取得失敗リストに追加
                         failed_processed_uid_list.append(uid)
