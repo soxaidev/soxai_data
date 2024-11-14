@@ -79,13 +79,15 @@ class DataLoader():
         except:
             return None
 
-    def getDailyData(self, start_date=None, end_date=None, convert_to_local_time=True):
+    def getDailyData(self, start_date=None, end_date=None, convert_to_local_time=True, timeout=5.0):
         """
         Retrieves daily data from the SOXAI database within the specified date range.
 
         Args:
             start_date (str, optional): The start date of the data range. Defaults to '-7d'.
             end_date (str, optional): The end date of the data range. Defaults to 'now()'.
+            convert_to_local_time (booleanm, optional): The flag to change to local time
+            timeout (float, optional): The timeout in seconds (Up to 60.0)
 
         Returns:
             pandas.DataFrame: A DataFrame containing the retrieved data.
@@ -111,24 +113,26 @@ class DataLoader():
                 """.format(start_date, end_date)
         print('query posted to url' + query)
         try:
-            response = httpx.post(url, headers=self.headers, data=query)
+            response = httpx.post(url, headers=self.headers, data=query, timeout=httpx.Timeout(timeout))
             data = response.json()
             df =  pd.DataFrame(data)
             if convert_to_local_time:
                 df = self.post_process_data(df)
             return df
-          
+        
         except Exception as e:
             print("Error in querying the data", e)
             return None
         
-    def getDetailData(self, start_date=None, end_date=None, convert_to_local_time=True):
+    def getDetailData(self, start_date=None, end_date=None, convert_to_local_time=True, timeout=5.0):
         """
         Retrieves daily detail data from the SOXAI database.
 
         Args:
             start_date (str or None): The start date of the data range in the format 'YYYY-MM-DD'. If None, the default is '-1d' (one day ago).
             end_date (str or None): The end date of the data range in the format 'YYYY-MM-DD'. If None, the default is 'now()' (current date and time).
+            convert_to_local_time (booleanm, optional): The flag to change to local time
+            timeout (float, optional): The timeout in seconds (Up to 60.0)
 
         Returns:
             pandas.DataFrame or None: The retrieved data as a pandas DataFrame, or None if an error occurred during the data retrieval.
@@ -151,7 +155,7 @@ class DataLoader():
                 """.format(start_date, end_date)
         print('query posted to url' + query)
         try:
-            response = httpx.post(url, headers=self.headers, data=query)
+            response = httpx.post(url, headers=self.headers, data=query, timeout=httpx.Timeout(timeout))
             data = response.json()
             df =  pd.DataFrame(data)
             if convert_to_local_time:
@@ -216,4 +220,46 @@ class DataLoader():
             return df
         except Exception as e:
             print("Error in querying the data", e)
+            return None    
+
+
+    def getDailyDataByUid(self, uid, start_time, stop_time, timeout=5.0):
+        """
+        Retrieves daily data from the SOXAI database within the specified date range by uid.
+
+        Args:
+            uid (str): The uid to specify in the condition
+            start_date (str, optional): The start date of the data range. Defaults to '-7d'.
+            end_date (str, optional): The end date of the data range. Defaults to 'now()'.
+            timeout (float, optional): The timeout in seconds (Up to 60.0)
+
+        Returns:
+            pandas.DataFrame: A DataFrame containing the retrieved data.
+
+        Raises:
+            Exception: If there is an error in querying the data.
+
+        """
+        if not uid:
             return None
+        url = self.url + f'DailyInfoData/{uid}'
+        if start_time is None:
+            start_time = '-30d'
+        else:
+            start_time = int(pd.Timestamp(start_time).timestamp())
+        if stop_time is None:
+            stop_time = 'now()'
+        else:
+            stop_time = int(pd.Timestamp(stop_time).timestamp())
+
+        query = f"?page=0&start_time={start_time}&stop_time={stop_time}&format=json"
+
+        try:
+            response = httpx.get(url + query, headers=self.headers, timeout=httpx.Timeout(timeout))
+            data = json.loads(response.json())
+            df =  pd.DataFrame(data)
+            return df
+        except Exception as e:
+            print("Error in querying the data", e)
+            return None
+
