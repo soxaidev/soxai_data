@@ -183,6 +183,46 @@ class DataLoader():
         return df
     
 
+    def getRawData(self, uid, start_date=None, end_date=None, timeout=5.0):
+        """
+        Retrieves raw data from the SOXAI database within the specified date range.
+
+        Args:
+            uid (str): The uid to specify in the condition
+            start_date (str, optional): The start date of the data range. Defaults to '-7d'.
+            end_date (str, optional): The end date of the data range. Defaults to 'now()'.
+            convert_to_local_time (booleanm, optional): The flag to change to local time
+            timeout (float, optional): The timeout in seconds (Up to 60.0)
+
+        Returns:
+            pandas.DataFrame: A DataFrame containing the retrieved data.
+
+        Raises:
+            Exception: If there is an error in querying the data.
+
+        """
+        if start_date is None:
+            start_date = '-7d'
+        else:
+            start_date = int(pd.Timestamp(start_date).timestamp())
+        if end_date is None:
+            end_date = 'now()'
+        else:
+            end_date = int(pd.Timestamp(end_date).timestamp())
+
+        url = self.url + f'RawData/{uid}'
+        query = f"?page=0&start_time={start_date}&stop_time={end_date}&format=json"
+
+        try:
+            response = httpx.get(url + query, headers=self.headers, timeout=httpx.Timeout(timeout))
+            data = json.loads(response.json())
+            df =  pd.DataFrame(data)
+            return df
+        except Exception as e:
+            print("Error in querying the data", e)
+            return None    
+
+
     def getDailyDataByUid(self, uid, start_time, stop_time, timeout=5.0):
         """
         Retrieves daily data from the SOXAI database within the specified date range by uid.
@@ -200,7 +240,6 @@ class DataLoader():
             Exception: If there is an error in querying the data.
 
         """
-        result_list = []
         if not uid:
             return None
         url = self.url + f'DailyInfoData/{uid}'
