@@ -79,13 +79,31 @@ class DataLoader():
         except:
             return None
 
-    def getDailyData(self, start_date=None, end_date=None, convert_to_local_time=True):
+    def add_uid_filter_to_flux_query(self, flux_query: str, uids: list) -> str:
+        uid_filter = ' or '.join([f'r["uid"] == "{uid}"' for uid in uids])
+        filter_statement = f'|> filter(fn: (r) => {uid_filter})\n'
+
+        # Find Insertion Position
+        range_index = flux_query.find('|> range(')
+        if range_index != -1:
+            # Insert the filter statement on the line below the range statement
+            insert_index = flux_query.index('\n', range_index) + 1
+            modified_flux_query = flux_query[:insert_index] + filter_statement + flux_query[insert_index:]
+            return modified_flux_query
+
+        # If the range statement is not found, the original query statement is returned directly
+        raise Exception('Cannot find range statement in flux query')
+
+    def getDailyData(self, start_date=None, end_date=None, convert_to_local_time=True, uid_list:list = [], timeout=60.0):
         """
         Retrieves daily data from the SOXAI database within the specified date range.
 
         Args:
             start_date (str, optional): The start date of the data range. Defaults to '-7d'.
             end_date (str, optional): The end date of the data range. Defaults to 'now()'.
+            convert_to_local_time (booleanm, optional): The flag to change to local time.
+            uid_list (list): The uid to specify in the condition.
+            timeout (float, optional): The timeout in seconds. (Up to 120.0)
 
         Returns:
             pandas.DataFrame: A DataFrame containing the retrieved data.
@@ -109,26 +127,31 @@ class DataLoader():
                     |> filter(fn: (r) => r["_measurement"] == "SX_Daily_Prod") 
                     |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
                 """.format(start_date, end_date)
-        print('query posted to url' + query)
+        
+        if len(uid_list) > 0:
+            query = self.add_uid_filter_to_flux_query(query, uid_list)
+
         try:
-            response = httpx.post(url, headers=self.headers, data=query)
+            response = httpx.post(url, headers=self.headers, data=query, timeout=httpx.Timeout(timeout))
             data = response.json()
             df =  pd.DataFrame(data)
             if convert_to_local_time:
                 df = self.post_process_data(df)
             return df
-          
         except Exception as e:
             print("Error in querying the data", e)
             return None
         
-    def getDetailData(self, start_date=None, end_date=None, convert_to_local_time=True):
+    def getDetailData(self, start_date=None, end_date=None, convert_to_local_time=True, uid_list:list = [], timeout=60.0):
         """
         Retrieves daily detail data from the SOXAI database.
 
         Args:
             start_date (str or None): The start date of the data range in the format 'YYYY-MM-DD'. If None, the default is '-1d' (one day ago).
             end_date (str or None): The end date of the data range in the format 'YYYY-MM-DD'. If None, the default is 'now()' (current date and time).
+            convert_to_local_time (booleanm, optional): The flag to change to local time.
+            uid_list (list): The uid to specify in the condition.
+            timeout (float, optional): The timeout in seconds. (Up to 120.0)
 
         Returns:
             pandas.DataFrame or None: The retrieved data as a pandas DataFrame, or None if an error occurred during the data retrieval.
@@ -149,9 +172,12 @@ class DataLoader():
                     |> filter(fn: (r) => r["_measurement"] == "SX_Detail_Prod") 
                     |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
                 """.format(start_date, end_date)
-        print('query posted to url' + query)
+
+        if len(uid_list) > 0:
+            query = self.add_uid_filter_to_flux_query(query, uid_list)
+
         try:
-            response = httpx.post(url, headers=self.headers, data=query)
+            response = httpx.post(url, headers=self.headers, data=query, timeout=httpx.Timeout(timeout))
             data = response.json()
             df =  pd.DataFrame(data)
             if convert_to_local_time:
