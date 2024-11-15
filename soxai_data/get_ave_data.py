@@ -202,7 +202,8 @@ class AverageDataExecutor:
                         failed_processed_uid_list.append(uid)
                         print('failed_get_from_influxDB')
                         continue
-                    csvFile.write_df_csv(df, './aaaaaaa.csv')
+                    if len(df) < 1:
+                        continue
                     # データ加工
                     df_result = dataProcessing.get_average_datas(df, start_datetime, self.period_cnt)
                     # 結果リストに追加
