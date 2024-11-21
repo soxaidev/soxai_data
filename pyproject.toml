@@ -4,17 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "soxai_data"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
   "httpx",
   "pandas",
 ]
 requires-python = ">=3.8"
 authors = [
-  {name = "Shuang Liu", email = "shuang.liu@soxai.co.jp"}
+  {name = "SOXAI Inc.", email = "dev@soxai.co.jp"}
 ]
 maintainers = [
- {name = "Shuang Liu", email = "shuang.liu@soxai.co.jp"}
+ {name = "SOXAI Inc.", email = "dev@soxai.co.jp"}
 ]
 description = "SOXAI Data Science Library"
 readme = "README.md"
