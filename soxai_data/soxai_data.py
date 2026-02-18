@@ -1,6 +1,8 @@
+import re
 import httpx
 import pandas as pd
 import json
+from datetime import datetime, timezone
 
 class DataLoader():
     def __init__(self, token):
@@ -243,3 +245,137 @@ class DataLoader():
         except Exception as e:
             print("Error in querying the data", e)
             return None
+
+    def getDailyInfoV2(self, start_date=None, end_date=None, uid_list:list = [], timeout=60.0):
+        """
+        Retrieves daily info data from the SOXAI database within the specified date range.
+
+        Args:
+            start_date (str, optional): The start date of the data range. Formats like 'YYYY-MM-DD'. Defaults to 7 days before the current date.
+            end_date (str, optional): The end date of the data range. Formats like 'YYYY-MM-DD'. Defaults to the current date.
+            uid_list (list): The uid to specify in the condition.
+            timeout (float, optional): The timeout in seconds. (Up to 120.0)
+        
+        Returns:
+            pandas.DataFrame: A DataFrame containing the retrieved data.
+
+        Raises:
+            Exception: If there is an error in querying the data.
+        """
+        url = self.url + 'v2/DailyInfoData/'
+
+        # date format check
+        if start_date:
+            try:
+                datetime.strptime(start_date, "%Y-%m-%d")
+            except ValueError:
+                raise ValueError(f"Incorrect start_date format({start_date}), should be YYYY-MM-DD")
+        else:
+            # calculate the before 7 days date from now
+            start_date = (datetime.now(timezone.utc) - pd.Timedelta(days=7)).date().strftime("%Y-%m-%d")
+        
+        if end_date:
+            try:
+                datetime.strptime(end_date, "%Y-%m-%d")
+            except ValueError:
+                raise ValueError(f"Incorrect end_date format({end_date}), should be YYYY-MM-DD")
+        else:
+            end_date = datetime.now(timezone.utc).date().strftime("%Y-%m-%d")
+
+        # date range check
+        if datetime.strptime(start_date, "%Y-%m-%d") > datetime.strptime(end_date, "%Y-%m-%d"):
+            raise ValueError(f"start_date({start_date}) must not be after end_date({end_date})")
+
+        # send request for each uid and combine the data
+        fetched_data_list = []
+        for uid in uid_list:
+            request_url = url + f"{uid}?start_day={start_date}&end_day={end_date}&format=json"
+            try:
+                response = httpx.get(request_url, headers=self.headers, timeout=httpx.Timeout(timeout))
+                data = response.json()
+                fetched_data_list.extend(data)
+            except Exception as e:
+                print("Error in querying the data", e)
+                return None
+            
+        # data length check
+        if len(fetched_data_list) == 0:
+            print("No data fetched for the given uid list and date range.")
+            return None
+        
+        # cpmvert the data to dataframe
+        df = pd.DataFrame(fetched_data_list)
+        return df
+    
+    def getDailyDataV2(self, start_datetime: str, end_datetime: str, uid_list: list = [], timeout: float = 60.0):
+        """
+        Retrieves daily detail data from the SOXAI v2 API within the specified datetime range.
+
+        args:
+            - start_datetime : Start datetime string in 'YYYY-MM-DDThh:mm:ss+HH:MM' format (timezone required). e.g. '2026-01-20T00:00:00+09:00'
+            - end_datetime : End datetime string in 'YYYY-MM-DDThh:mm:ss+HH:MM' format (timezone required). e.g. '2026-01-20T02:00:00+09:00'
+            - uid_list : List of uids to fetch data for.
+            - timeout : Timeout in seconds. (Up to 120.0)
+        returns:
+            - pandas.DataFrame containing the retrieved data, or None if no data or error.
+        raises:
+            - ValueError: If the datetime format is invalid, timezone is missing, or start_datetime is not before end_datetime.
+        """
+        url = self.url + 'v2/DailyDetailData/'
+        _DATETIME_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$')
+
+        # validate start_datetime
+        if not _DATETIME_PATTERN.fullmatch(start_datetime):
+            raise ValueError(
+                f"Incorrect start_datetime format ({start_datetime}), "
+                "should be YYYY-MM-DDThh:mm:ss+HH:MM (e.g. 2026-01-20T00:00:00+09:00)"
+            )
+        try:
+            parsed_start = datetime.fromisoformat(start_datetime)
+        except ValueError:
+            raise ValueError(f"Invalid start_datetime value: {start_datetime}")
+
+        # validate end_datetime
+        if not _DATETIME_PATTERN.fullmatch(end_datetime):
+            raise ValueError(
+                f"Incorrect end_datetime format ({end_datetime}), "
+                "should be YYYY-MM-DDThh:mm:ss+HH:MM (e.g. 2026-01-20T02:00:00+09:00)"
+            )
+        try:
+            parsed_end = datetime.fromisoformat(end_datetime)
+        except ValueError:
+            raise ValueError(f"Invalid end_datetime value: {end_datetime}")
+
+        # datetime range check (compared in UTC considering timezone offset)
+        if parsed_start >= parsed_end:
+            raise ValueError(
+                f"start_datetime({start_datetime}) must be before end_datetime({end_datetime})"
+            )
+
+        # send request for each uid and combine the data
+        fetched_data_list = []
+        for uid in uid_list:
+            request_url = url + uid
+            params = {
+                "start_day": start_datetime,
+                "end_day": end_datetime,
+                "format": "json",
+            }
+            try:
+                response = httpx.get(request_url, headers=self.headers, params=params, timeout=httpx.Timeout(timeout))
+                data = response.json()
+                if not isinstance(data, list):
+                    continue
+                fetched_data_list.extend(data)
+            except Exception as e:
+                print("Error in querying the data", e)
+                return None
+
+        # data length check
+        if len(fetched_data_list) == 0:
+            print("No data fetched for the given uid list and datetime range.")
+            return None
+
+        df = pd.DataFrame(fetched_data_list)
+        return df
+
