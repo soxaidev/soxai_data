@@ -75,6 +75,35 @@ detail_df = sx_data.getDetailData(start_date='2023-01-01', end_date='2023-01-31'
 print(detail_df)
 ```
 
+### Get Daily Info Data (V2)
+
+To retrieve daily info data for specific users using the V2 API:
+
+```python
+# Retrieve daily info data for specified uids
+daily_info_df = sx_data.getDailyInfoV2(
+    start_date='2026-01-01',
+    end_date='2026-01-07',
+    uid_list=['uid1', 'uid2']
+)
+print(daily_info_df)
+```
+
+### Get Daily Detail Data (V2)
+
+To retrieve daily detail data for specific users with datetime-level precision using the V2 API.
+The datetime must be in `YYYY-MM-DDThh:mm:ss+HH:MM` format with a timezone offset:
+
+```python
+# Retrieve daily detail data for specified uids within a datetime range
+daily_detail_df = sx_data.getDailyDataV2(
+    start_datetime='2026-01-20T00:00:00+09:00',
+    end_datetime='2026-01-20T02:00:00+09:00',
+    uid_list=['uid1', 'uid2']
+)
+print(daily_detail_df)
+```
+
 ### Complete Example
 
 Here's a complete example that includes retrieving and merging data:
@@ -144,6 +173,39 @@ Retrieves detailed data from the SOXAI database within the specified date range.
 
 **Returns:**  
 `pandas.DataFrame`: A DataFrame containing the retrieved data.
+
+### `DataLoader.getDailyInfoV2(start_date=None, end_date=None, uid_list=[], timeout=60.0)`
+
+Retrieves daily info data from the SOXAI v2 API for the specified users and date range.
+
+**Parameters:**
+- `start_date` (str, optional): The start date in `YYYY-MM-DD` format. Defaults to 7 days before today.
+- `end_date` (str, optional): The end date in `YYYY-MM-DD` format. Defaults to today.
+- `uid_list` (list): List of uids to fetch data for.
+- `timeout` (float, optional): Timeout in seconds. Defaults to 60.0.
+
+**Returns:**
+`pandas.DataFrame`: A DataFrame containing the retrieved data, or `None` if no data or an error occurred.
+
+**Raises:**
+`ValueError`: If the date format is invalid or `start_date` is after `end_date`.
+
+### `DataLoader.getDailyDataV2(start_datetime, end_datetime, uid_list=[], timeout=60.0)`
+
+Retrieves daily detail data from the SOXAI v2 API for the specified users and datetime range.
+Unlike `getDailyInfoV2`, this method accepts datetime strings with time and timezone information, enabling hour-level data retrieval.
+
+**Parameters:**
+- `start_datetime` (str): The start datetime in `YYYY-MM-DDThh:mm:ss+HH:MM` format (timezone required). e.g. `2026-01-20T00:00:00+09:00`
+- `end_datetime` (str): The end datetime in `YYYY-MM-DDThh:mm:ss+HH:MM` format (timezone required). e.g. `2026-01-20T02:00:00+09:00`
+- `uid_list` (list): List of uids to fetch data for.
+- `timeout` (float, optional): Timeout in seconds. Defaults to 60.0.
+
+**Returns:**
+`pandas.DataFrame`: A DataFrame containing the retrieved data, or `None` if no data or an error occurred.
+
+**Raises:**
+`ValueError`: If the datetime format is invalid, timezone is missing, or `start_datetime` is not before `end_datetime`.
 
 ## Additional Notes
 
