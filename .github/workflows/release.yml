@@ -10,6 +10,9 @@ jobs:
     name: Bump version, tag, and create release
     runs-on: ubuntu-latest
     if: "!contains(github.event.head_commit.message, 'chore: bump version')"
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
     environment:
       name: pypi
       url: https://pypi.org/p/soxai_data
@@ -26,7 +29,11 @@ jobs:
       - name: Get current version
         id: current_version
         run: |
-          VERSION=$(grep -E '^\s*version\s*=' pyproject.toml | sed 's/.*version\s*=\s*"\(.*\)"/\1/')
+          VERSION=$(grep -E '^[[:space:]]*version[[:space:]]*=' pyproject.toml | sed -E 's/.*version[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')
+          if [ -z "$VERSION" ]; then
+            echo "Error: Failed to parse version from pyproject.toml" >&2
+            exit 1
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Bump patch version
