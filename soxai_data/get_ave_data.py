@@ -102,7 +102,7 @@ class SoxaiWebApi:
         if uid_list is None:
             uid_list = []
         try:
-            # pass by keyword: getDailyInfoV2 takes uid_list before convert_to_local_time
+            # convert_to_local_time and timeout are keyword only on getDailyInfoV2
             df = self.sx_data.getDailyInfoV2(
                 start_date=start_date,
                 end_date=end_date,
@@ -123,9 +123,11 @@ class DataProcessing:
         """
         Convert the _time column to utc aware datetimes and sort by it.
 
-        Converting before sorting keeps the order correct even when the api returns
-        timestamps in mixed formats or offsets, and forcing utc keeps the later
-        comparisons against current_date from mixing naive and aware datetimes.
+        Converting before sorting keeps the order correct when the api returns timestamps
+        with different offsets, and forcing utc keeps the later comparisons against
+        current_date from mixing naive and aware datetimes. pandas infers a single format
+        for the whole column, so a response that mixes string formats raises ValueError
+        here instead of being parsed row by row.
 
         args:
             - df : DataFrame holding a _time column
@@ -383,8 +385,11 @@ class AverageDataExecutor:
         - <prefix>_failed_uid.csv : the uids that failed, written only if any
 
         When uids are left over, input_file is repointed at the not processed csv so that
-        the next run continues with them instead of starting over. task_executed is set
-        once every uid has been processed, which is what stops execute_scheduler.
+        the next run continues with them instead of starting over. task_executed, which is
+        what stops execute_scheduler, is set once every uid has been processed, and also
+        when this run reached every uid of its input without a single one of them yielding
+        data: repeating that run unchanged cannot make progress, so the leftover uids are
+        left in the not processed and failed files instead of being retried forever.
 
         args:
             - process_start_time : start of the processing window in "hh:mm" format, or
@@ -428,12 +433,17 @@ class AverageDataExecutor:
         # read the uids to process
         df_uid_list = csv_file.read_csv_df(input_file)
 
+        # how many uids this run got to, which tells a run cut short by the closing time
+        # window apart from a run that went through the whole list
+        attempted_cnt = 0
+
         for uid in df_uid_list['UID list']:
-            print(f'processing uid {uid}')
             if not self.within_time_range(start_time, end_time):
                 # out of the window, so leave the remaining uids to the next run
                 print('ended tasks for today')
                 break
+            attempted_cnt += 1
+            print(f'processing uid {uid}')
             df = soxai_web_api.get_daily_data_by_uid(
                 start_date=start_date,
                 end_date=None,
@@ -465,13 +475,23 @@ class AverageDataExecutor:
         else:
             df_not_processed_uid = df_uid_list
 
-        if len(df_not_processed_uid) > 0:
+        if len(df_not_processed_uid) == 0:
+            # every uid has been processed, so the scheduler can stop
+            self.task_executed = True
+        else:
             csv_file.write_df_csv(df_not_processed_uid, not_processed_uid_path)
             # resume from the remaining uids on the next run instead of starting over
             self.input_file = not_processed_uid_path
-        else:
-            # every uid has been processed, so the scheduler can stop
-            self.task_executed = True
+            if attempted_cnt == len(df_uid_list) and not df_result_list:
+                # this run reached every uid of its input and none of them produced data,
+                # so repeating it unchanged cannot make progress either. stopping here is
+                # what keeps execute_scheduler from retrying the same uids forever; the
+                # uids are left in the not processed and failed files to be looked at
+                print(
+                    f'no uid could be processed in a full pass, giving up on '
+                    f'{len(df_not_processed_uid)} uids'
+                )
+                self.task_executed = True
 
         if len(failed_processed_uid_list) > 0:
             df_failed_uid = pd.DataFrame(failed_processed_uid_list, columns=['UID list'])
@@ -489,7 +509,9 @@ class AverageDataExecutor:
         Run execute once a day until every uid of the input csv has been processed.
 
         A run that goes past schedule_end_time stops and hands its remaining uids to the
-        run of the next day, so the loop can span several days.
+        run of the next day, so the loop can span several days. It also ends when a run
+        got to every uid of its input and none of them yielded data, so that uids that
+        keep failing or that hold no data do not keep the loop alive forever.
 
         args:
             - schedule_start_time : time of day the run starts, in "hh:mm" format

@@ -731,6 +731,42 @@ class TestExecute:
         executor_env.executor.execute()
         assert executor_env.csv_file.write_csv_sort_index.call_count == 0
 
+    def test_a_full_pass_without_any_result_stops_the_scheduler(self, executor_env, capsys):
+        # Retrying a pass that reached every uid and produced nothing cannot help.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = None
+        executor_env.web_api.get_daily_data_by_uid.return_value = None
+        executor_env.executor.execute()
+        assert executor_env.executor.task_executed is True
+        assert 'giving up on 2 uids' in capsys.readouterr().out
+
+    def test_a_full_pass_without_any_result_still_records_the_leftovers(self, executor_env):
+        # Giving up must leave the uids on disk for a human to look at.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = None
+        executor_env.web_api.get_daily_data_by_uid.return_value = None
+        executor_env.executor.execute()
+        leftover = [c[0][0] for c in executor_env.csv_file.write_df_csv.call_args_list
+                    if 'not_processed' in c[0][1]]
+        assert list(leftover[0]['UID list']) == ['uid-aaa', 'uid-bbb']
+        assert any('failed_uid' in p for p in written_paths(executor_env.csv_file))
+
+    def test_a_full_pass_with_one_result_keeps_the_scheduler_running(self, executor_env):
+        # One uid still succeeded, so the failing one is worth one more run.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = [
+            None, make_rows([0, 1], uid='uid-bbb'),
+        ]
+        executor_env.executor.execute()
+        assert executor_env.executor.task_executed is False
+
+    def test_a_truncated_pass_without_any_result_keeps_the_scheduler_running(self, executor_env):
+        # The window closed before the second uid, so the next run still has work to do.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = None
+        executor_env.web_api.get_daily_data_by_uid.return_value = None
+        answers = iter([True, True, False])
+        with mock.patch.object(AverageDataExecutor, 'within_time_range',
+                               side_effect=lambda *a: next(answers)):
+            executor_env.executor.execute('09:00', '18:00')
+        assert executor_env.executor.task_executed is False
+
     def test_input_csv_is_read_once(self, executor_env):
         # The uid list is read a single time per run.
         executor_env.executor.execute()

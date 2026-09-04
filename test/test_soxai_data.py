@@ -424,6 +424,13 @@ class TestGetDailyInfoV2:
         df = loader.getDailyInfoV2(start_date='2026-09-03', uid_list=['uid-aaa'])
         assert set(make_daily_info_row().keys()) == set(df.columns)
 
+    def test_a_positional_timeout_raises(self, loader, fake_httpx):
+        # The old fourth positional argument was timeout, so it must not land silently
+        # in convert_to_local_time.
+        with pytest.raises(TypeError):
+            loader.getDailyInfoV2('2026-09-03', '2026-09-05', ['uid-aaa'], 120.0)
+        assert fake_httpx.calls == []
+
 
 class TestGetDailyDataV2:
     """DataLoader.getDailyDataV2."""
@@ -500,6 +507,14 @@ class TestGetDailyDataV2:
         df = loader.getDailyDataV2('2026-09-03T00:00:00Z', '2026-09-05T00:00:00Z',
                                    uid_list=['uid-aaa'], convert_to_local_time=True)
         assert df.index.name == 'local_time'
+
+
+    def test_a_positional_timeout_raises(self, loader, fake_httpx):
+        # Same as getDailyInfoV2: the argument that shifted has to fail loudly.
+        with pytest.raises(TypeError):
+            loader.getDailyDataV2('2026-09-03T00:00:00Z', '2026-09-05T00:00:00Z',
+                                  ['uid-aaa'], 120.0)
+        assert fake_httpx.calls == []
 
 
 class TestFetchV2Data:

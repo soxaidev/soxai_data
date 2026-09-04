@@ -212,6 +212,7 @@ class DataLoader:
         start_date: Optional[DateLike] = None,
         end_date: Optional[DateLike] = None,
         uid_list: Optional[list] = None,
+        *,
         convert_to_local_time: bool = False,
         timeout: float = 60.0,
     ):
@@ -226,13 +227,17 @@ class DataLoader:
             - end_date : the end date of the data range, read the same way as start_date.
               Defaults to the current utc date
             - uid_list : the uids to fetch data for
-            - convert_to_local_time : whether to convert the timestamps to local time
-            - timeout : the timeout in seconds (Up to 120.0)
+            - convert_to_local_time : keyword only, whether to convert the timestamps to
+              local time
+            - timeout : keyword only, the timeout in seconds (Up to 120.0). It is keyword
+              only so that a caller that used to pass it as the fourth positional argument
+              gets a TypeError instead of silently setting convert_to_local_time
         returns:
             - DataFrame containing the retrieved data, or None if no data could be fetched
         raises:
             - ValueError : if a date argument cannot be read as a date or datetime, or
               start_date is after end_date
+            - TypeError : if convert_to_local_time or timeout is passed positionally
         """
         if uid_list is None:
             uid_list = []
@@ -269,6 +274,7 @@ class DataLoader:
         start_datetime: DateLike,
         end_datetime: DateLike,
         uid_list: Optional[list] = None,
+        *,
         convert_to_local_time: bool = False,
         timeout: float = 60.0,
     ):
@@ -283,13 +289,17 @@ class DataLoader:
             - end_datetime : the end of the datetime range, read the same way as
               start_datetime
             - uid_list : the uids to fetch data for
-            - convert_to_local_time : whether to convert the timestamps to local time
-            - timeout : the timeout in seconds (Up to 120.0)
+            - convert_to_local_time : keyword only, whether to convert the timestamps to
+              local time
+            - timeout : keyword only, the timeout in seconds (Up to 120.0). It is keyword
+              only so that a caller that used to pass it as the fourth positional argument
+              gets a TypeError instead of silently setting convert_to_local_time
         returns:
             - DataFrame containing the retrieved data, or None if no data could be fetched
         raises:
             - ValueError : if a datetime argument cannot be read as a date or datetime, or
               start_datetime is not before end_datetime
+            - TypeError : if convert_to_local_time or timeout is passed positionally
         """
         if uid_list is None:
             uid_list = []
