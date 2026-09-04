@@ -26,9 +26,23 @@ classifiers = [
   "Programming Language :: Python"
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+]
+
 [project.urls]
 Homepage = "https://soxai.co.jp"
 Documentation = "https://soxai.co.jp/docs"
 Repository = "https://github.com/soxaidev/soxai_data"
 "Bug Tracker" = "https://github.com/soxaidev/soxai_data/issues"
 Changelog = "https://github.com/soxaidev/soxai_data/blob/master/CHANGELOG.md"
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+pythonpath = ["."]
+# a bare `pytest` run stays offline; use `pytest -m integration` for the live tests
+addopts = "-m 'not integration'"
+markers = [
+  "integration: tests that call the real SOXAI web api (skipped without credentials)",
+]
