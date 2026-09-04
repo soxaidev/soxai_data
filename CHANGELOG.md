@@ -121,6 +121,13 @@ fixed.
     produced no data at all, which covers a uid that holds no data, a uid that keeps
     failing and a time window too short to reach any data. A run that produced nothing is
     still retried until that budget runs out, because an api failure can be transient.
+  - left a one day gap between two consecutive averaging periods, so a day whose
+    timestamp did not fall at the same time of day as the first one, after a timezone
+    change or a dst transition, was left out of every period and averaged into nothing;
+  - registered its daily task on the `schedule` module's default scheduler and never
+    removed it, so a second call to `execute_scheduler()` ran the whole job twice a day,
+    and `run_pending()` also drove the jobs the caller had registered for its own
+    purposes. It now uses a scheduler of its own.
 - Text fields such as `sleep_start_time_true` no longer appear as columns of `NaN` in the
   averaged output.
 

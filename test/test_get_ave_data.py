@@ -6,6 +6,7 @@ from unittest import mock
 import httpx
 import pandas as pd
 import pytest
+import schedule
 
 from soxai_data import get_ave_data
 from soxai_data.get_ave_data import (
@@ -422,6 +423,22 @@ class TestGetPeriodDateDf:
         groups = DataProcessing().get_period_date_df(df, self.periods())
         assert len(groups[1]) == 0
 
+    def test_a_row_after_the_end_date_belongs_to_that_period(self):
+        # The day end_date falls on belongs to the period, not to the gap before the next.
+        df = DataProcessing().sort_df_by_time(
+            pd.DataFrame([{'_time': '2022-03-01T12:00:00+00:00', 'uid': 'uid-aaa'}])
+        )
+        groups = DataProcessing().get_period_date_df(df, self.periods())
+        assert [len(g) for g in groups] == [1, 0]
+
+    def test_the_next_period_does_not_take_the_row_twice(self):
+        # The periods tile the timeline, so no row may land in two of them.
+        df = DataProcessing().sort_df_by_time(
+            pd.DataFrame([{'_time': '2022-03-02T00:00:00+00:00', 'uid': 'uid-aaa'}])
+        )
+        groups = DataProcessing().get_period_date_df(df, self.periods())
+        assert [len(g) for g in groups] == [0, 1]
+
 
 class TestGetAverageDatas:
     """DataProcessing.get_average_datas."""
@@ -467,6 +484,22 @@ class TestGetAverageDatas:
         # The period validation is reachable through the public entry point.
         with pytest.raises(ValueError):
             DataProcessing().get_average_datas(make_rows([0]), CURRENT_DATE, 0)
+
+    def test_no_row_is_lost_when_the_time_of_day_shifts(self):
+        # A timezone change moves _time within the day; every row must still be averaged.
+        rows = []
+        for offset in range(70):
+            time = pd.Timestamp('2022-03-01T15:00:00+00:00') + pd.Timedelta(days=offset)
+            if offset >= 25:
+                # the user moved from +09:00 to utc, so the daily row moved by 9 hours
+                time = time + pd.Timedelta(hours=9)
+            rows.append({'_time': time.isoformat(), 'uid': 'uid-aaa', 'sleep_score': 1.0})
+        df = pd.DataFrame(rows)
+        processing = DataProcessing()
+        df_sorted = processing.sort_df_by_time(df)
+        periods = processing.make_list_period_date(df_sorted, CURRENT_DATE, 30)
+        groups = processing.get_period_date_df(df_sorted, periods)
+        assert sum(len(group) for group in groups) == len(df)
 
 
 class TestGetTime:
@@ -903,8 +936,9 @@ class TestExecuteScheduler:
 
     def test_registers_a_daily_task(self, executor_env):
         # The run is scheduled once a day at the given time.
-        with mock.patch.object(get_ave_data, 'schedule') as scheduler, \
+        with mock.patch.object(get_ave_data, 'schedule') as schedule_module, \
                 mock.patch.object(get_ave_data.time, 'sleep'):
+            scheduler = schedule_module.Scheduler.return_value
             scheduler.run_pending.side_effect = lambda: setattr(
                 executor_env.executor, 'task_executed', True
             )
@@ -913,14 +947,40 @@ class TestExecuteScheduler:
 
     def test_passes_the_window_to_execute(self, executor_env):
         # The scheduled call carries the same window it was registered with.
-        with mock.patch.object(get_ave_data, 'schedule') as scheduler, \
+        with mock.patch.object(get_ave_data, 'schedule') as schedule_module, \
                 mock.patch.object(get_ave_data.time, 'sleep'):
+            scheduler = schedule_module.Scheduler.return_value
             scheduler.run_pending.side_effect = lambda: setattr(
                 executor_env.executor, 'task_executed', True
             )
             executor_env.executor.execute_scheduler('09:00', '18:00')
         kwargs = scheduler.every.return_value.day.at.return_value.do.call_args[1]
         assert kwargs == {'process_start_time': '09:00', 'process_end_time': '18:00'}
+
+    def test_the_task_is_registered_on_a_scheduler_of_its_own(self, executor_env):
+        # A job on the shared default scheduler would outlive the loop and fire again.
+        with mock.patch.object(get_ave_data, 'schedule') as schedule_module, \
+                mock.patch.object(get_ave_data.time, 'sleep'):
+            scheduler = schedule_module.Scheduler.return_value
+            scheduler.run_pending.side_effect = lambda: setattr(
+                executor_env.executor, 'task_executed', True
+            )
+            executor_env.executor.execute_scheduler('09:00', '18:00')
+        schedule_module.Scheduler.assert_called_once_with()
+        schedule_module.every.assert_not_called()
+        schedule_module.run_pending.assert_not_called()
+
+    def test_the_default_scheduler_is_left_empty(self, executor_env):
+        # Run against the real module: a leaked job would double the runs of the next call.
+        with mock.patch.object(get_ave_data.time, 'sleep'):
+            for _ in range(2):
+                with mock.patch.object(
+                    schedule.Scheduler,
+                    'run_pending',
+                    lambda _self: setattr(executor_env.executor, 'task_executed', True),
+                ):
+                    executor_env.executor.execute_scheduler('09:00', '18:00')
+        assert schedule.get_jobs() == []
 
     def test_loops_until_the_task_is_done(self, executor_env):
         # The loop keeps polling the scheduler until every uid has been processed.
@@ -932,9 +992,9 @@ class TestExecuteScheduler:
             if calls['n'] >= 3:
                 executor_env.executor.task_executed = True
 
-        with mock.patch.object(get_ave_data, 'schedule') as scheduler, \
+        with mock.patch.object(get_ave_data, 'schedule') as schedule_module, \
                 mock.patch.object(get_ave_data.time, 'sleep') as sleep:
-            scheduler.run_pending.side_effect = run_pending
+            schedule_module.Scheduler.return_value.run_pending.side_effect = run_pending
             executor_env.executor.execute_scheduler('09:00', '18:00')
         assert calls['n'] == 3
         assert sleep.call_count == 3
@@ -949,9 +1009,9 @@ class TestExecuteScheduler:
             polled['n'] += 1
             executor_env.executor.task_executed = True
 
-        with mock.patch.object(get_ave_data, 'schedule') as scheduler, \
+        with mock.patch.object(get_ave_data, 'schedule') as schedule_module, \
                 mock.patch.object(get_ave_data.time, 'sleep'):
-            scheduler.run_pending.side_effect = run_pending
+            schedule_module.Scheduler.return_value.run_pending.side_effect = run_pending
             executor_env.executor.execute_scheduler('09:00', '18:00')
         assert polled['n'] == 1
 
@@ -959,9 +1019,9 @@ class TestExecuteScheduler:
         # A budget spent by an earlier scheduler run must not end this one early.
         executor_env.executor.fruitless_run_cnt = AverageDataExecutor.MAX_FRUITLESS_RUNS
 
-        with mock.patch.object(get_ave_data, 'schedule') as scheduler, \
+        with mock.patch.object(get_ave_data, 'schedule') as schedule_module, \
                 mock.patch.object(get_ave_data.time, 'sleep'):
-            scheduler.run_pending.side_effect = lambda: setattr(
+            schedule_module.Scheduler.return_value.run_pending.side_effect = lambda: setattr(
                 executor_env.executor, 'task_executed', True
             )
             executor_env.executor.execute_scheduler('09:00', '18:00')
@@ -969,9 +1029,9 @@ class TestExecuteScheduler:
 
     def test_waits_between_polls(self, executor_env):
         # Polling without sleeping would spin the cpu at 100 percent.
-        with mock.patch.object(get_ave_data, 'schedule') as scheduler, \
+        with mock.patch.object(get_ave_data, 'schedule') as schedule_module, \
                 mock.patch.object(get_ave_data.time, 'sleep') as sleep:
-            scheduler.run_pending.side_effect = lambda: setattr(
+            schedule_module.Scheduler.return_value.run_pending.side_effect = lambda: setattr(
                 executor_env.executor, 'task_executed', True
             )
             executor_env.executor.execute_scheduler('09:00', '18:00')

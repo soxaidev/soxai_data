@@ -265,6 +265,10 @@ class DataProcessing:
         """
         Split df into one DataFrame per period.
 
+        A period covers start_date up to, but not including, the day after end_date, so
+        that consecutive periods tile the timeline without a gap between them. end_date
+        itself is therefore still inside the period.
+
         args:
             - df : DataFrame holding a utc aware _time column
             - date_period_list : the periods to split df by
@@ -274,10 +278,14 @@ class DataProcessing:
         """
         df_period_list = []
         for date_period in date_period_list:
-            # take the rows that fall inside the period, both boundaries included
+            # the next period starts one day after end_date, so the bound has to be one
+            # day after end_date as well. stopping at end_date itself would drop the rows
+            # in between, which _time reaches as soon as its time of day shifts, e.g.
+            # after a timezone change or a dst transition
+            period_stop = date_period['end_date'] + datetime.timedelta(days=1)
             df_period = df[
                 (df['_time'] >= date_period['start_date'])
-                & (df['_time'] <= date_period['end_date'])
+                & (df['_time'] < period_stop)
             ]
             df_period_list.append(df_period)
         return df_period_list
@@ -588,8 +596,13 @@ class AverageDataExecutor:
         """
         print(f'this program will start at {schedule_start_time} and end at {schedule_end_time}')
 
+        # a scheduler of this call only. the module level default scheduler is shared by
+        # the whole process, so a job registered on it would outlive the loop below and
+        # fire a second time on the next call, and run_pending would also drive the jobs
+        # the caller registered for its own purposes
+        scheduler = schedule.Scheduler()
         # register the daily task
-        schedule.every().day.at(schedule_start_time).do(
+        scheduler.every().day.at(schedule_start_time).do(
             self.execute,
             process_start_time=schedule_start_time,
             process_end_time=schedule_end_time,
@@ -601,7 +614,7 @@ class AverageDataExecutor:
 
         while not self.task_executed:
             # wait for the scheduled time
-            schedule.run_pending()
+            scheduler.run_pending()
             time.sleep(1)
 
         print('All done')
