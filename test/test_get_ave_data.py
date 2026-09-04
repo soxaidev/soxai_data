@@ -3,16 +3,35 @@
 import datetime
 from unittest import mock
 
+import httpx
 import pandas as pd
 import pytest
 
 from soxai_data import get_ave_data
 from soxai_data.get_ave_data import (
+    MAX_RANGE_DAYS,
     AverageDataExecutor,
     CsvFile,
     DataProcessing,
     SoxaiWebApi,
 )
+
+
+def make_http_status_error(status_code):
+    """
+    Build the error the web api client raises for an error status.
+
+    args:
+        - status_code : the http status of the answer
+    returns:
+        - the httpx.HTTPStatusError carrying a response with that status
+    """
+    request = httpx.Request('GET', 'https://web-api.example/api/')
+    return httpx.HTTPStatusError(
+        f'{status_code} error',
+        request=request,
+        response=httpx.Response(status_code, request=request),
+    )
 
 
 def make_rows(day_offsets, uid='uid-aaa', start='2022-03-01', naive=True, legacy=False):
@@ -157,12 +176,29 @@ class TestSoxaiWebApi:
         assert got is expected
 
     def test_failure_returns_none(self, capsys):
-        # A raising api call is reported and yields None.
+        # An error a later run may get past is reported and yields None.
         with mock.patch.object(get_ave_data, 'DataLoader') as loader_class:
             loader_class.return_value.getDailyInfoV2.side_effect = RuntimeError('boom')
             got = SoxaiWebApi('my-key').get_daily_data_by_uid(uid_list=['uid-aaa'])
         assert got is None
         assert 'failed to get data' in capsys.readouterr().out
+
+    def test_a_server_error_returns_none(self, capsys):
+        # A 5xx is the api failing on its own side, which a later run may get past.
+        with mock.patch.object(get_ave_data, 'DataLoader') as loader_class:
+            loader_class.return_value.getDailyInfoV2.side_effect = make_http_status_error(500)
+            got = SoxaiWebApi('my-key').get_daily_data_by_uid(uid_list=['uid-aaa'])
+        assert got is None
+        assert 'failed to get data' in capsys.readouterr().out
+
+    def test_a_rejected_request_is_raised(self, capsys):
+        # A 4xx answers the same way however often it is asked, so hiding it behind None
+        # would have the caller retry a request that cannot succeed.
+        with mock.patch.object(get_ave_data, 'DataLoader') as loader_class:
+            loader_class.return_value.getDailyInfoV2.side_effect = make_http_status_error(403)
+            with pytest.raises(httpx.HTTPStatusError):
+                SoxaiWebApi('my-key').get_daily_data_by_uid(uid_list=['uid-aaa'])
+        assert 'rejected the request' in capsys.readouterr().out
 
 
 class TestSortDfByTime:
@@ -600,10 +636,20 @@ class TestExecute:
         executor_env.executor.execute()
         assert executor_env.web_api.get_daily_data_by_uid.call_count == 2
 
-    def test_fetch_uses_the_configured_start_date(self, executor_env):
-        # The oldest date is sent as a 'YYYY-MM-DD' string.
+    def test_fetch_asks_for_the_longest_range_the_api_accepts(self, executor_env):
+        # The window is exactly MAX_RANGE_DAYS days, sent as 'YYYY-MM-DD' strings.
         executor_env.executor.execute()
-        assert executor_env.web_api.get_daily_data_by_uid.call_args[1]['start_date'] == '2022-03-01'
+        sent = executor_env.web_api.get_daily_data_by_uid.call_args[1]
+        span = pd.Timestamp(sent['end_date']) - pd.Timestamp(sent['start_date'])
+        assert span == pd.Timedelta(days=MAX_RANGE_DAYS)
+
+    def test_fetch_ends_on_the_day_of_the_run(self, executor_env):
+        # Both ends come from the run's own clock, so a run that crosses midnight cannot
+        # ask for a range the api rejects. The file prefix carries that same clock.
+        executor_env.executor.execute()
+        sent = executor_env.web_api.get_daily_data_by_uid.call_args[1]
+        day = written_paths(executor_env.csv_file)[0].split('/')[-1][:8]
+        assert sent['end_date'] == f'{day[:4]}-{day[4:6]}-{day[6:8]}'
 
     def test_fetch_asks_for_one_uid_at_a_time(self, executor_env):
         # The averaging is per uid, so the uids are fetched separately.
@@ -628,6 +674,14 @@ class TestExecute:
         executor_env.executor.execute()
         path = executor_env.csv_file.write_csv_sort_index.call_args[0][1]
         assert path.startswith('/tmp/out/') and path.endswith('_user_uid.csv')
+
+    def test_output_prefix_carries_milliseconds(self, executor_env):
+        # Two runs inside the same second would share a second precision prefix and write
+        # over each other's results, so the prefix goes down to milliseconds.
+        executor_env.executor.execute()
+        path = executor_env.csv_file.write_csv_sort_index.call_args[0][1]
+        stamp = path.split('/')[-1].split('_')[0]
+        assert len(stamp) == 17 and stamp.isdigit()
 
     def test_completion_sets_the_task_flag(self, executor_env):
         # Once every uid is processed the scheduler can stop.
@@ -731,23 +785,52 @@ class TestExecute:
         executor_env.executor.execute()
         assert executor_env.csv_file.write_csv_sort_index.call_count == 0
 
-    def test_a_full_pass_without_any_result_stops_the_scheduler(self, executor_env, capsys):
-        # Retrying a pass that reached every uid and produced nothing cannot help.
-        executor_env.web_api.get_daily_data_by_uid.side_effect = None
-        executor_env.web_api.get_daily_data_by_uid.return_value = None
+    def test_a_rejected_uid_does_not_earn_a_retry(self, executor_env, capsys):
+        # A 4xx repeats on every run, so there is nothing for a later run to come back for.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = make_http_status_error(403)
         executor_env.executor.execute()
         assert executor_env.executor.task_executed is True
-        assert 'giving up on 2 uids' in capsys.readouterr().out
+        assert 'nothing left that another run could fetch' in capsys.readouterr().out
 
-    def test_a_full_pass_without_any_result_still_records_the_leftovers(self, executor_env):
-        # Giving up must leave the uids on disk for a human to look at.
+    def test_a_rejected_uid_is_recorded_as_failed(self, executor_env):
+        # Giving up on the uid still has to leave it on disk for a human to look at.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = make_http_status_error(403)
+        executor_env.executor.execute()
+        assert any('failed_uid' in p for p in written_paths(executor_env.csv_file))
+
+    def test_a_rejected_uid_does_not_stop_the_other_uids(self, executor_env):
+        # Only the rejected uid is dropped, the ones after it are still fetched.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = [
+            make_http_status_error(404), make_rows([0, 1], uid='uid-bbb'),
+        ]
+        executor_env.executor.execute()
+        written = executor_env.csv_file.write_csv_sort_index.call_args[0][0]
+        assert list(written['uid']) == ['uid-bbb']
+
+    def test_one_recoverable_failure_still_earns_a_retry(self, executor_env):
+        # A rejected uid does not make the run hopeless while another one may recover.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = [
+            make_http_status_error(403), None,
+        ]
+        executor_env.executor.execute()
+        assert executor_env.executor.task_executed is False
+
+    def test_a_fruitless_pass_keeps_the_scheduler_running(self, executor_env):
+        # A run that produced nothing can be a transient failure, so it is worth a retry.
         executor_env.web_api.get_daily_data_by_uid.side_effect = None
         executor_env.web_api.get_daily_data_by_uid.return_value = None
         executor_env.executor.execute()
-        leftover = [c[0][0] for c in executor_env.csv_file.write_df_csv.call_args_list
-                    if 'not_processed' in c[0][1]]
-        assert list(leftover[0]['UID list']) == ['uid-aaa', 'uid-bbb']
-        assert any('failed_uid' in p for p in written_paths(executor_env.csv_file))
+        assert executor_env.executor.task_executed is False
+
+    def test_repeated_fruitless_passes_stop_the_scheduler(self, executor_env, capsys):
+        # A run that never starts producing data must not keep the loop alive forever.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = None
+        executor_env.web_api.get_daily_data_by_uid.return_value = None
+        for _ in range(AverageDataExecutor.MAX_FRUITLESS_RUNS):
+            executor_env.executor.execute()
+        assert executor_env.executor.task_executed is True
+        assert (f'{AverageDataExecutor.MAX_FRUITLESS_RUNS} runs produced no data, '
+                'giving up on 2 uids') in capsys.readouterr().out
 
     def test_a_full_pass_with_one_result_keeps_the_scheduler_running(self, executor_env):
         # One uid still succeeded, so the failing one is worth one more run.
@@ -765,6 +848,42 @@ class TestExecute:
         with mock.patch.object(AverageDataExecutor, 'within_time_range',
                                side_effect=lambda *a: next(answers)):
             executor_env.executor.execute('09:00', '18:00')
+        assert executor_env.executor.task_executed is False
+
+    def test_a_truncated_pass_of_rejected_uids_keeps_the_scheduler_running(self, executor_env):
+        # The window closed before the second uid, which has not been tried even once, so
+        # the run cannot be called hopeless even though nothing it saw was recoverable.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = make_http_status_error(403)
+        answers = iter([True, True, False])
+        with mock.patch.object(AverageDataExecutor, 'within_time_range',
+                               side_effect=lambda *a: next(answers)):
+            executor_env.executor.execute('09:00', '18:00')
+        assert executor_env.executor.task_executed is False
+
+    def test_repeated_truncated_passes_stop_the_scheduler(self, executor_env):
+        # A window too short to reach any data never makes a full pass, and must not keep
+        # the loop alive forever either.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = None
+        executor_env.web_api.get_daily_data_by_uid.return_value = None
+        runs = AverageDataExecutor.MAX_FRUITLESS_RUNS
+        # every run enters the window, reaches the first uid and then finds it closed
+        answers = iter([True, True, False] * runs)
+        with mock.patch.object(AverageDataExecutor, 'within_time_range',
+                               side_effect=lambda *a: next(answers)):
+            for _ in range(runs):
+                executor_env.executor.execute('09:00', '18:00')
+        assert executor_env.executor.task_executed is True
+
+    def test_a_run_that_produced_data_gives_the_retries_back(self, executor_env):
+        # Data means the situation is not stuck, so the following runs count from zero.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = None
+        executor_env.web_api.get_daily_data_by_uid.return_value = None
+        for _ in range(AverageDataExecutor.MAX_FRUITLESS_RUNS - 1):
+            executor_env.executor.execute()
+        executor_env.web_api.get_daily_data_by_uid.return_value = make_rows([0, 1])
+        executor_env.executor.execute()
+        executor_env.web_api.get_daily_data_by_uid.return_value = None
+        executor_env.executor.execute()
         assert executor_env.executor.task_executed is False
 
     def test_input_csv_is_read_once(self, executor_env):
@@ -835,6 +954,18 @@ class TestExecuteScheduler:
             scheduler.run_pending.side_effect = run_pending
             executor_env.executor.execute_scheduler('09:00', '18:00')
         assert polled['n'] == 1
+
+    def test_retry_budget_is_reset_before_the_loop(self, executor_env):
+        # A budget spent by an earlier scheduler run must not end this one early.
+        executor_env.executor.fruitless_run_cnt = AverageDataExecutor.MAX_FRUITLESS_RUNS
+
+        with mock.patch.object(get_ave_data, 'schedule') as scheduler, \
+                mock.patch.object(get_ave_data.time, 'sleep'):
+            scheduler.run_pending.side_effect = lambda: setattr(
+                executor_env.executor, 'task_executed', True
+            )
+            executor_env.executor.execute_scheduler('09:00', '18:00')
+        assert executor_env.executor.fruitless_run_cnt == 0
 
     def test_waits_between_polls(self, executor_env):
         # Polling without sleeping would spin the cpu at 100 percent.

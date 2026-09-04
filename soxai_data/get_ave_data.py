@@ -12,10 +12,11 @@ import datetime
 import time
 from typing import Dict, List, Optional
 
+import httpx
 import pandas as pd
 import schedule
 
-from .soxai_data import DataLoader
+from .soxai_data import DataLoader, MAX_RANGE_DAYS
 
 
 class CsvFile:
@@ -56,7 +57,7 @@ class CsvFile:
 
 
 class SoxaiWebApi:
-    """Thin wrapper around DataLoader that never raises on a failed request."""
+    """Thin wrapper around DataLoader that only raises when a retry cannot help."""
 
     def __init__(self, api_key: str) -> None:
         """
@@ -97,7 +98,11 @@ class SoxaiWebApi:
             - uid_list : the uids to fetch the data for
             - timeout : the timeout in seconds
         returns:
-            - the fetched DataFrame, or None if the request failed
+            - the fetched DataFrame, or None if the api answered without data or failed in
+              a way a later run may get past
+        raises:
+            - httpx.HTTPStatusError : if the api answered with a 4xx status. The same
+              request keeps getting that answer, so the caller must not retry it
         """
         if uid_list is None:
             uid_list = []
@@ -111,7 +116,18 @@ class SoxaiWebApi:
                 timeout=timeout,
             )
             return df
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code < 500:
+                # a bad request, a bad token, a missing permission or an unknown uid, all
+                # of which answer the same way however often they are asked
+                print(f'the web api rejected the request  {e}')
+                raise
+            # the api failed on its own side, which a later run may get past
+            print(f'failed to get data from the web api  {e}')
+            return None
         except Exception as e:
+            # a timeout, a connection error or an unexpected payload, which a later run
+            # may get past as well
             print(f'failed to get data from the web api  {e}')
             return None
 
@@ -305,6 +321,11 @@ class DataProcessing:
 class AverageDataExecutor:
     """Run the averaging over a csv of uids, once or on a daily schedule."""
 
+    # a run that produced no data at all is repeated on the following days up to this
+    # many times. retrying covers a transient api failure, while the limit keeps a
+    # permanent one from keeping execute_scheduler alive forever
+    MAX_FRUITLESS_RUNS = 3
+
     def __init__(
         self,
         api_key: str,
@@ -326,6 +347,8 @@ class AverageDataExecutor:
         self.input_file = input_file
         self.output_file_path = output_file_path
         self.task_executed = False
+        # how many runs in a row produced no data, reset as soon as one produces some
+        self.fruitless_run_cnt = 0
 
     def within_time_range(
         self,
@@ -377,6 +400,9 @@ class AverageDataExecutor:
         """
         Average the data of every uid of the input csv and write the results.
 
+        The averages cover the newest MAX_RANGE_DAYS days ending on the day the run
+        starts, which is the longest range the api answers in one request.
+
         Three csv files are written to output_file_path, all prefixed with the utc start
         time of the run:
 
@@ -387,9 +413,15 @@ class AverageDataExecutor:
         When uids are left over, input_file is repointed at the not processed csv so that
         the next run continues with them instead of starting over. task_executed, which is
         what stops execute_scheduler, is set once every uid has been processed, and also
-        when this run reached every uid of its input without a single one of them yielding
-        data: repeating that run unchanged cannot make progress, so the leftover uids are
-        left in the not processed and failed files instead of being retried forever.
+        when repeating the run cannot be expected to help:
+
+        - the run saw every uid of its input, produced no data and hit nothing that a
+          later run could get past, so a repeat would do the same work for the same
+          result. A uid the api rejects with a 4xx counts as answered for good here
+        - MAX_FRUITLESS_RUNS runs in a row produced no data while hitting something a
+          later run might have got past, a 5xx or a closing time window
+
+        The leftover uids stay in the not processed and failed files either way.
 
         args:
             - process_start_time : start of the processing window in "hh:mm" format, or
@@ -411,15 +443,24 @@ class AverageDataExecutor:
         # measure the start time
         start_datetime = datetime.datetime.now(datetime.timezone.utc)
 
-        # output paths of this run, all sharing the start time as their prefix
+        # output paths of this run, all sharing the start time as their prefix. the
+        # prefix carries milliseconds so that two runs started inside the same second
+        # cannot write over each other's results
         input_file = self.input_file
-        file_prefix = f'{self.output_file_path}/{start_datetime.strftime("%Y%m%d%H%M%S")}'
+        run_id = start_datetime.strftime('%Y%m%d%H%M%S%f')[:-3]
+        file_prefix = f'{self.output_file_path}/{run_id}'
         output_file_path = f'{file_prefix}_user_uid.csv'
         not_processed_uid_path = f'{file_prefix}_not_processed_uid.csv'
         failed_processed_uid_path = f'{file_prefix}_failed_uid.csv'
-        # the oldest date data is fetched from. getDailyInfoV2 reads a date without
-        # timezone information as utc
-        start_date = '2022-03-01'
+        # the day range data is fetched for. the api rejects a range longer than
+        # MAX_RANGE_DAYS, and splitting it would cost one request per window per uid, so
+        # a run covers the newest MAX_RANGE_DAYS days. both ends are taken from
+        # start_datetime, so a run that crosses midnight cannot ask for one day too many.
+        # getDailyInfoV2 reads a date without timezone information as utc
+        end_date = start_datetime.strftime('%Y-%m-%d')
+        start_date = (
+            start_datetime - datetime.timedelta(days=MAX_RANGE_DAYS)
+        ).strftime('%Y-%m-%d')
 
         # the averages of every processed uid
         df_result_list = []
@@ -433,27 +474,37 @@ class AverageDataExecutor:
         # read the uids to process
         df_uid_list = csv_file.read_csv_df(input_file)
 
-        # how many uids this run got to, which tells a run cut short by the closing time
-        # window apart from a run that went through the whole list
-        attempted_cnt = 0
+        # a fruitless run is only worth repeating when it did not see the whole input,
+        # or when something went wrong that a later run may get past
+        reached_every_uid = True
+        transient_failure = False
 
         for uid in df_uid_list['UID list']:
             if not self.within_time_range(start_time, end_time):
                 # out of the window, so leave the remaining uids to the next run
                 print('ended tasks for today')
+                reached_every_uid = False
                 break
-            attempted_cnt += 1
             print(f'processing uid {uid}')
-            df = soxai_web_api.get_daily_data_by_uid(
-                start_date=start_date,
-                end_date=None,
-                convert_to_local_time=False,
-                uid_list=[uid],
-                timeout=60.0,
-            )
-            if df is None:
-                # the request failed, so keep the uid for the next run
+            try:
+                df = soxai_web_api.get_daily_data_by_uid(
+                    start_date=start_date,
+                    end_date=end_date,
+                    convert_to_local_time=False,
+                    uid_list=[uid],
+                    timeout=60.0,
+                )
+            except httpx.HTTPStatusError as e:
+                # the api rejected this uid for good, so retrying it cannot help. the
+                # uids after it are unaffected and still worth fetching
                 failed_processed_uid_list.append(uid)
+                print(f'the web api rejected uid {uid} : {e}')
+                continue
+            if df is None:
+                # the request failed in a way a later run may get past, so keep the uid
+                # for the next run and let this run earn a retry
+                failed_processed_uid_list.append(uid)
+                transient_failure = True
                 print('failed_get_from_web_api')
                 continue
             if len(df) < 1:
@@ -475,6 +526,13 @@ class AverageDataExecutor:
         else:
             df_not_processed_uid = df_uid_list
 
+        # spend a retry on a run that produced nothing, and give the budget back as soon
+        # as a run produces something, so that only a stuck situation exhausts it
+        if df_result_list:
+            self.fruitless_run_cnt = 0
+        else:
+            self.fruitless_run_cnt += 1
+
         if len(df_not_processed_uid) == 0:
             # every uid has been processed, so the scheduler can stop
             self.task_executed = True
@@ -482,13 +540,23 @@ class AverageDataExecutor:
             csv_file.write_df_csv(df_not_processed_uid, not_processed_uid_path)
             # resume from the remaining uids on the next run instead of starting over
             self.input_file = not_processed_uid_path
-            if attempted_cnt == len(df_uid_list) and not df_result_list:
-                # this run reached every uid of its input and none of them produced data,
-                # so repeating it unchanged cannot make progress either. stopping here is
-                # what keeps execute_scheduler from retrying the same uids forever; the
-                # uids are left in the not processed and failed files to be looked at
+            # the uids are left in the not processed and failed files to be looked at in
+            # both of the cases below, which is what stops execute_scheduler
+            if reached_every_uid and not df_result_list and not transient_failure:
+                # every uid of the input was seen, none of them produced data and nothing
+                # went wrong that a later run could get past, so a repeat would do exactly
+                # the same work for exactly the same result
                 print(
-                    f'no uid could be processed in a full pass, giving up on '
+                    'nothing left that another run could fetch, giving up on '
+                    f'{len(df_not_processed_uid)} uids'
+                )
+                self.task_executed = True
+            elif self.fruitless_run_cnt >= self.MAX_FRUITLESS_RUNS:
+                # the runs that produced nothing did hit something a later run might have
+                # got past, a 5xx or a closing time window, but not often enough to keep
+                # trying for good
+                print(
+                    f'{self.fruitless_run_cnt} runs produced no data, giving up on '
                     f'{len(df_not_processed_uid)} uids'
                 )
                 self.task_executed = True
@@ -509,9 +577,10 @@ class AverageDataExecutor:
         Run execute once a day until every uid of the input csv has been processed.
 
         A run that goes past schedule_end_time stops and hands its remaining uids to the
-        run of the next day, so the loop can span several days. It also ends when a run
-        got to every uid of its input and none of them yielded data, so that uids that
-        keep failing or that hold no data do not keep the loop alive forever.
+        run of the next day, so the loop can span several days. It also ends as soon as a
+        run cannot be usefully repeated, and after MAX_FRUITLESS_RUNS runs in a row that
+        produced no data, so that uids the api rejects, uids that hold no data and uids a
+        5xx keeps failing do not keep the loop alive forever.
 
         args:
             - schedule_start_time : time of day the run starts, in "hh:mm" format
@@ -527,6 +596,8 @@ class AverageDataExecutor:
         )
         # set once every uid has been processed
         self.task_executed = False
+        # the retry budget belongs to this scheduler run
+        self.fruitless_run_cnt = 0
 
         while not self.task_executed:
             # wait for the scheduled time

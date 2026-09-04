@@ -16,6 +16,10 @@ import pandas as pd
 # pandas.Timestamp are subclasses of datetime.date, so they are covered as well
 DateLike = Union[str, datetime.date]
 
+# the longest range the v2 endpoints accept. a longer one is answered with 400, so the
+# methods below refuse it before spending a request per uid on a known answer
+MAX_RANGE_DAYS = 366
+
 
 def _to_aware_timestamp(value: DateLike, arg_name: str) -> pd.Timestamp:
     """
@@ -130,7 +134,7 @@ class DataLoader:
         except Exception:
             return None
 
-    def post_process_data(self, df):
+    def _post_process_data(self, df):
         """
         Post process the data to make it more readable.
 
@@ -233,11 +237,15 @@ class DataLoader:
               only so that a caller that used to pass it as the fourth positional argument
               gets a TypeError instead of silently setting convert_to_local_time
         returns:
-            - DataFrame containing the retrieved data, or None if no data could be fetched
+            - DataFrame containing the retrieved data, or None if every uid answered
+              without data
         raises:
-            - ValueError : if a date argument cannot be read as a date or datetime, or
-              start_date is after end_date
+            - ValueError : if a date argument cannot be read as a date or datetime, if
+              start_date is after end_date, or if the range covers more than
+              MAX_RANGE_DAYS days
             - TypeError : if convert_to_local_time or timeout is passed positionally
+            - httpx.HTTPStatusError : if no uid answered with data and the api answered
+              with an error status
         """
         if uid_list is None:
             uid_list = []
@@ -262,12 +270,21 @@ class DataLoader:
         if start_day > end_day:
             raise ValueError(f"start_date({start_day}) must not be after end_date({end_day})")
 
+        # a longer range is rejected by the api, so it is a caller error rather than an
+        # empty result. raising keeps the request that is certain to fail off the api
+        span_days = (pd.Timestamp(end_day) - pd.Timestamp(start_day)).days
+        if span_days > MAX_RANGE_DAYS:
+            raise ValueError(
+                f"the range of start_date({start_day}) and end_date({end_day}) covers "
+                f"{span_days} days, which must not exceed {MAX_RANGE_DAYS}"
+            )
+
         params = {
             "start_day": start_day,
             "end_day": end_day,
             "format": "json",
         }
-        return self.fetch_v2_data(url, params, uid_list, convert_to_local_time, timeout)
+        return self._fetch_v2_data(url, params, uid_list, convert_to_local_time, timeout)
 
     def getDailyDataV2(
         self,
@@ -295,11 +312,15 @@ class DataLoader:
               only so that a caller that used to pass it as the fourth positional argument
               gets a TypeError instead of silently setting convert_to_local_time
         returns:
-            - DataFrame containing the retrieved data, or None if no data could be fetched
+            - DataFrame containing the retrieved data, or None if every uid answered
+              without data
         raises:
-            - ValueError : if a datetime argument cannot be read as a date or datetime, or
-              start_datetime is not before end_datetime
+            - ValueError : if a datetime argument cannot be read as a date or datetime, if
+              start_datetime is not before end_datetime, or if the range covers more than
+              MAX_RANGE_DAYS days
             - TypeError : if convert_to_local_time or timeout is passed positionally
+            - httpx.HTTPStatusError : if no uid answered with data and the api answered
+              with an error status
         """
         if uid_list is None:
             uid_list = []
@@ -318,20 +339,33 @@ class DataLoader:
                 f"start_datetime({start_datetime}) must be before end_datetime({end_datetime})"
             )
 
+        # a longer range is rejected by the api, so it is a caller error rather than an
+        # empty result. raising keeps the request that is certain to fail off the api
+        span_days = (end_timestamp - start_timestamp).days
+        if span_days > MAX_RANGE_DAYS:
+            raise ValueError(
+                f"the range of start_datetime({start_datetime}) and "
+                f"end_datetime({end_datetime}) covers {span_days} days, which must not "
+                f"exceed {MAX_RANGE_DAYS}"
+            )
+
         # send an explicit offset so that the api never has to guess the timezone
         params = {
             "start_day": start_timestamp.isoformat(timespec='seconds'),
             "end_day": end_timestamp.isoformat(timespec='seconds'),
             "format": "json",
         }
-        return self.fetch_v2_data(url, params, uid_list, convert_to_local_time, timeout)
+        return self._fetch_v2_data(url, params, uid_list, convert_to_local_time, timeout)
 
-    def fetch_v2_data(self, url, params, uid_list, convert_to_local_time, timeout):
+    def _fetch_v2_data(self, url, params, uid_list, convert_to_local_time, timeout):
         """
         Fetch v2 api data for each uid and combine the results into one DataFrame.
 
         A uid that fails is reported and skipped, so the data of the uids that did
-        succeed is still returned.
+        succeed is still returned. When no uid answered with data and at least one
+        request failed, that failure is raised instead: there is no data to isolate it
+        from, and returning None would make a failed request look like a range that
+        simply holds nothing.
 
         args:
             - url : the endpoint url, ending with a slash
@@ -340,10 +374,16 @@ class DataLoader:
             - convert_to_local_time : whether to convert the timestamps to local time
             - timeout : the timeout in seconds
         returns:
-            - DataFrame containing the combined data, or None if no data could be fetched
+            - DataFrame containing the combined data, or None if every uid answered
+              without data
+        raises:
+            - Exception : the first failure, when no uid answered with data and at least
+              one request failed. An error status arrives as httpx.HTTPStatusError
         """
         fetched_data_list = []
         failed_uid_list = []
+        # the first failure, kept so that a call that fetched nothing can report why
+        first_error = None
         for uid in uid_list:
             try:
                 response = httpx.get(
@@ -357,11 +397,15 @@ class DataLoader:
             except Exception as e:
                 print(f"Error in querying the data for {uid}", e)
                 failed_uid_list.append(uid)
+                if first_error is None:
+                    first_error = e
                 continue
             if not isinstance(data, list):
                 # an error response is a dict, and extending with it would add its keys as rows
                 print(f"Unexpected response for {uid} : {data}")
                 failed_uid_list.append(uid)
+                if first_error is None:
+                    first_error = ValueError(f"Unexpected response for {uid} : {data}")
                 continue
             fetched_data_list.extend(data)
 
@@ -373,12 +417,16 @@ class DataLoader:
 
         # data length check
         if len(fetched_data_list) == 0:
+            if first_error is not None:
+                # nothing was fetched and at least one request failed, so report that
+                # failure instead of letting it pass for an empty date range
+                raise first_error
             print("No data fetched for the given uid list and date range.")
             return None
 
         df = pd.DataFrame(fetched_data_list)
 
         if convert_to_local_time:
-            df = self.post_process_data(df)
+            df = self._post_process_data(df)
 
         return df

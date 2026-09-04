@@ -147,7 +147,7 @@ class TestDailyInfoV2:
         assert pd.to_datetime(daily_info['_time']).dt.tz is not None
 
     def test_the_offset_of_the_user_is_reported(self, daily_info):
-        # post_process_data shifts _time by this column.
+        # _post_process_data shifts _time by this column.
         assert pd.api.types.is_integer_dtype(daily_info['utc_offset_mins'])
 
     def test_every_row_belongs_to_the_requested_uid(self, daily_info, api_uid):
@@ -161,7 +161,7 @@ class TestDailyInfoV2:
         assert times.max() <= pd.Timestamp(INTEGRATION_END_DATE, tz='UTC') + pd.Timedelta(days=1)
 
     def test_convert_to_local_time_indexes_by_local_time(self, live_loader, api_uid):
-        # The flag has to reach post_process_data on a real response too.
+        # The flag has to reach _post_process_data on a real response too.
         df = live_loader.getDailyInfoV2(
             start_date=INTEGRATION_START_DATE,
             end_date=INTEGRATION_END_DATE,
@@ -180,14 +180,16 @@ class TestDailyInfoV2:
         )
         assert df is not None and len(df) > 0
 
-    def test_an_unknown_uid_yields_no_data(self, live_loader):
-        # A uid that does not exist is reported as no data rather than as rows.
-        df = live_loader.getDailyInfoV2(
-            start_date=INTEGRATION_START_DATE,
-            end_date=INTEGRATION_END_DATE,
-            uid_list=['this-uid-does-not-exist'],
-        )
-        assert df is None
+    def test_an_unknown_uid_raises(self, live_loader):
+        # A uid that does not exist is answered with 404, or with 403 when the caller is
+        # a PartnerAdmin or an OrgAdmin, never with an empty result. This call carries no
+        # other uid, so there is no data to isolate the failure from and it is raised.
+        with pytest.raises(httpx.HTTPStatusError):
+            live_loader.getDailyInfoV2(
+                start_date=INTEGRATION_START_DATE,
+                end_date=INTEGRATION_END_DATE,
+                uid_list=['this-uid-does-not-exist'],
+            )
 
     def test_a_failing_uid_does_not_discard_the_others(self, live_loader, api_uid):
         # One unknown uid must not throw away the data of the working one.

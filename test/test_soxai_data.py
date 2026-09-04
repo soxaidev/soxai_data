@@ -193,73 +193,73 @@ class TestGetMyOrgUsers:
 
 
 class TestPostProcessData:
-    """DataLoader.post_process_data."""
+    """DataLoader._post_process_data."""
 
     def test_indexes_by_local_time(self, loader):
         # The result is indexed by local_time.
-        df = loader.post_process_data(pd.DataFrame([make_daily_info_row()]))
+        df = loader._post_process_data(pd.DataFrame([make_daily_info_row()]))
         assert df.index.name == 'local_time'
 
     def test_local_time_is_the_wall_clock_of_the_offset(self, loader):
         # A +09:00 user's midnight utc row becomes 09:00 local wall clock.
-        df = loader.post_process_data(pd.DataFrame([make_daily_info_row(utc_offset_mins=540)]))
+        df = loader._post_process_data(pd.DataFrame([make_daily_info_row(utc_offset_mins=540)]))
         assert str(df.index[0]) == '2026-09-03 09:00:00'
 
     def test_negative_offset_moves_the_wall_clock_back(self, loader):
         # A -300 minute offset moves the wall clock to the previous day.
-        df = loader.post_process_data(pd.DataFrame([make_daily_info_row(utc_offset_mins=-300)]))
+        df = loader._post_process_data(pd.DataFrame([make_daily_info_row(utc_offset_mins=-300)]))
         assert str(df.index[0]) == '2026-09-02 19:00:00'
 
     def test_local_time_is_timezone_naive(self, loader):
         # Keeping the utc label would make the local wall clock look like utc.
-        df = loader.post_process_data(pd.DataFrame([make_daily_info_row()]))
+        df = loader._post_process_data(pd.DataFrame([make_daily_info_row()]))
         assert df.index[0].tzinfo is None
 
     def test_time_without_timezone_is_read_as_utc(self, loader):
         # The _time column follows the same rule as the date arguments.
         row = make_daily_info_row(time='2026-09-03T00:00:00', utc_offset_mins=540)
-        df = loader.post_process_data(pd.DataFrame([row]))
+        df = loader._post_process_data(pd.DataFrame([row]))
         assert str(df.index[0]) == '2026-09-03 09:00:00'
 
     def test_time_with_timezone_keeps_its_offset(self, loader):
         # An offset on _time is followed: 00:00+09:00 is 15:00 utc, which plus 540 minutes
         # is midnight of the next day.
         row = make_daily_info_row(time='2026-09-03T00:00:00+09:00', utc_offset_mins=540)
-        df = loader.post_process_data(pd.DataFrame([row]))
+        df = loader._post_process_data(pd.DataFrame([row]))
         assert str(df.index[0]) == '2026-09-03 00:00:00'
 
     def test_the_raw_time_column_is_replaced(self, loader):
         # _time is superseded by the local_time index.
-        df = loader.post_process_data(pd.DataFrame([make_daily_info_row()]))
+        df = loader._post_process_data(pd.DataFrame([make_daily_info_row()]))
         assert '_time' not in df.columns
 
     def test_legacy_columns_are_dropped_when_present(self, loader):
         # The v2 api no longer returns these, but a v1 shaped response is still handled.
-        df = loader.post_process_data(pd.DataFrame([make_legacy_daily_info_row()]))
+        df = loader._post_process_data(pd.DataFrame([make_legacy_daily_info_row()]))
         for column in ('_start', '_stop', '_time', '_measurement'):
             assert column not in df.columns
 
     def test_metric_columns_are_kept(self, loader):
         # The measurements themselves survive the post processing.
-        df = loader.post_process_data(pd.DataFrame([make_daily_info_row()]))
+        df = loader._post_process_data(pd.DataFrame([make_daily_info_row()]))
         assert 'sleep_score' in df.columns and 'uid' in df.columns
 
     def test_input_dataframe_is_not_modified(self, loader):
         # The caller's DataFrame must not be mutated in place.
         source = pd.DataFrame([make_daily_info_row()])
         before = list(source.columns)
-        loader.post_process_data(source)
+        loader._post_process_data(source)
         assert list(source.columns) == before
 
     def test_missing_optional_columns_do_not_raise(self, loader):
         # The v2 api returns none of the legacy columns, so the drop has to tolerate that.
-        df = loader.post_process_data(pd.DataFrame([make_daily_info_row()]))
+        df = loader._post_process_data(pd.DataFrame([make_daily_info_row()]))
         assert df.index.name == 'local_time'
 
     def test_rows_keep_their_own_offset(self, loader):
         # Each row is shifted by its own utc_offset_mins.
         rows = [make_daily_info_row(utc_offset_mins=540), make_daily_info_row(utc_offset_mins=0)]
-        df = loader.post_process_data(pd.DataFrame(rows))
+        df = loader._post_process_data(pd.DataFrame(rows))
         assert [str(i) for i in df.index] == ['2026-09-03 09:00:00', '2026-09-03 00:00:00']
 
 
@@ -366,6 +366,20 @@ class TestGetDailyInfoV2:
             loader.getDailyInfoV2(start_date='2026-09-03T00:00:00+09:00',
                                   end_date='2026-09-02T20:00:00+00:00', uid_list=['uid-aaa'])
 
+    def test_a_range_over_the_api_limit_raises(self, loader, fake_httpx):
+        # The api answers 400 for such a range, so the request is not worth sending.
+        with pytest.raises(ValueError, match='must not exceed 366'):
+            loader.getDailyInfoV2(start_date='2022-03-01', end_date='2026-09-05',
+                                  uid_list=['uid-aaa'])
+        assert fake_httpx.calls == []
+
+    def test_a_range_at_the_api_limit_is_allowed(self, loader, fake_httpx):
+        # The limit itself is a valid range, so exactly 366 days still reaches the api.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        loader.getDailyInfoV2(start_date='2025-09-04', end_date='2026-09-05',
+                              uid_list=['uid-aaa'])
+        assert len(fake_httpx.calls) == 1
+
     def test_same_day_range_is_allowed(self, loader, fake_httpx):
         # A single day range is valid.
         fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
@@ -406,7 +420,7 @@ class TestGetDailyInfoV2:
         assert fake_httpx.last_params['format'] == 'json'
 
     def test_convert_to_local_time_indexes_by_local_time(self, loader, fake_httpx):
-        # The flag has to reach post_process_data and its result has to be returned.
+        # The flag has to reach _post_process_data and its result has to be returned.
         fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
         df = loader.getDailyInfoV2(start_date='2026-09-03', uid_list=['uid-aaa'],
                                    convert_to_local_time=True)
@@ -476,6 +490,20 @@ class TestGetDailyDataV2:
                                   uid_list=['uid-aaa'])
         assert fake_httpx.calls == []
 
+    def test_a_range_over_the_api_limit_raises(self, loader, fake_httpx):
+        # The same limit applies to the datetime range of the detail endpoint.
+        with pytest.raises(ValueError, match='must not exceed 366'):
+            loader.getDailyDataV2('2025-09-01T00:00:00Z', '2026-09-05T00:00:00Z',
+                                  uid_list=['uid-aaa'])
+        assert fake_httpx.calls == []
+
+    def test_a_range_at_the_api_limit_is_allowed(self, loader, fake_httpx):
+        # The limit itself is a valid range, so exactly 366 days still reaches the api.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        loader.getDailyDataV2('2025-09-04T00:00:00Z', '2026-09-05T00:00:00Z',
+                              uid_list=['uid-aaa'])
+        assert len(fake_httpx.calls) == 1
+
     def test_order_is_compared_across_offsets(self, loader, fake_httpx):
         # 00:00+09:00 is 15:00 utc of the day before, so this range is valid.
         fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
@@ -518,7 +546,7 @@ class TestGetDailyDataV2:
 
 
 class TestFetchV2Data:
-    """DataLoader.fetch_v2_data, the shared uid loop of the v2 methods."""
+    """DataLoader._fetch_v2_data, the shared uid loop of the v2 methods."""
 
     def params(self):
         """
@@ -533,7 +561,7 @@ class TestFetchV2Data:
         # The per uid responses end up in one DataFrame.
         fake_httpx.route('uid-aaa', FakeResponse(make_daily_info_rows(uid='uid-aaa')))
         fake_httpx.route('uid-bbb', FakeResponse(make_daily_info_rows(uid='uid-bbb')))
-        df = loader.fetch_v2_data(loader.url, self.params(), ['uid-aaa', 'uid-bbb'], False, 60.0)
+        df = loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa', 'uid-bbb'], False, 60.0)
         assert len(df) == 4
 
     def test_a_failing_uid_does_not_discard_the_others(self, loader, fake_httpx):
@@ -541,7 +569,7 @@ class TestFetchV2Data:
         fake_httpx.route('uid-aaa', FakeResponse(make_daily_info_rows(uid='uid-aaa')))
         fake_httpx.route('uid-bbb', httpx.ConnectError('boom'))
         fake_httpx.route('uid-ccc', FakeResponse(make_daily_info_rows(uid='uid-ccc')))
-        df = loader.fetch_v2_data(loader.url, self.params(),
+        df = loader._fetch_v2_data(loader.url, self.params(),
                                   ['uid-aaa', 'uid-bbb', 'uid-ccc'], False, 60.0)
         assert sorted(set(df['uid'])) == ['uid-aaa', 'uid-ccc']
 
@@ -549,47 +577,55 @@ class TestFetchV2Data:
         # A 401 on one uid leaves the other results intact.
         fake_httpx.route('uid-aaa', FakeResponse({}, status_code=401))
         fake_httpx.route('uid-bbb', FakeResponse(make_daily_info_rows(uid='uid-bbb')))
-        df = loader.fetch_v2_data(loader.url, self.params(), ['uid-aaa', 'uid-bbb'], False, 60.0)
+        df = loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa', 'uid-bbb'], False, 60.0)
         assert set(df['uid']) == {'uid-bbb'}
 
     def test_a_dict_response_is_not_turned_into_rows(self, loader, fake_httpx):
         # Extending with an error dict would add its keys as rows.
         fake_httpx.route('uid-aaa', FakeResponse({'detail': 'Not Found'}))
         fake_httpx.route('uid-bbb', FakeResponse(make_daily_info_rows(uid='uid-bbb')))
-        df = loader.fetch_v2_data(loader.url, self.params(), ['uid-aaa', 'uid-bbb'], False, 60.0)
+        df = loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa', 'uid-bbb'], False, 60.0)
         assert set(df['uid']) == {'uid-bbb'}
 
-    def test_returns_none_when_every_uid_fails(self, loader, fake_httpx):
-        # With nothing fetched there is no DataFrame to build.
+    def test_raises_when_every_uid_fails(self, loader, fake_httpx):
+        # With no data to isolate it from, a failure must not pass for an empty range.
         fake_httpx.route('*', httpx.ConnectError('boom'))
-        assert loader.fetch_v2_data(loader.url, self.params(), ['uid-aaa'], False, 60.0) is None
+        with pytest.raises(httpx.ConnectError):
+            loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa'], False, 60.0)
+
+    def test_raises_the_error_status_when_every_uid_fails(self, loader, fake_httpx):
+        # The status is what tells a caller error from an api that is having trouble.
+        fake_httpx.route('*', FakeResponse({'error': 'forbidden'}, status_code=403))
+        with pytest.raises(httpx.HTTPStatusError):
+            loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa'], False, 60.0)
 
     def test_returns_none_when_the_response_is_empty(self, loader, fake_httpx):
-        # An empty result set is reported as None.
+        # The api answers a range that holds nothing with 200 and an empty list, which is
+        # not a failure, so it stays None rather than raising.
         fake_httpx.route('*', FakeResponse([]))
-        assert loader.fetch_v2_data(loader.url, self.params(), ['uid-aaa'], False, 60.0) is None
+        assert loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa'], False, 60.0) is None
 
     def test_failed_uids_are_reported(self, loader, fake_httpx, capsys):
         # The failed uids are printed so that the caller can retry them.
         fake_httpx.route('uid-aaa', httpx.ConnectError('boom'))
         fake_httpx.route('uid-bbb', FakeResponse(make_daily_info_rows(uid='uid-bbb')))
-        loader.fetch_v2_data(loader.url, self.params(), ['uid-aaa', 'uid-bbb'], False, 60.0)
+        loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa', 'uid-bbb'], False, 60.0)
         assert 'uid-aaa' in capsys.readouterr().out
 
     def test_params_are_shared_by_every_request(self, loader, fake_httpx):
         # Every uid is fetched over the same range.
         fake_httpx.route('*', FakeResponse(make_daily_info_rows()))
-        loader.fetch_v2_data(loader.url, self.params(), ['uid-aaa', 'uid-bbb'], False, 60.0)
+        loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa', 'uid-bbb'], False, 60.0)
         assert all(call['params'] == self.params() for call in fake_httpx.calls)
 
     def test_api_key_header_is_sent(self, loader, fake_httpx):
         # Authentication travels on every request.
         fake_httpx.route('*', FakeResponse(make_daily_info_rows()))
-        loader.fetch_v2_data(loader.url, self.params(), ['uid-aaa'], False, 60.0)
+        loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa'], False, 60.0)
         assert fake_httpx.calls[-1]['headers']['soxai-api-key'] == 'dummy-token'
 
     def test_convert_to_local_time_is_applied(self, loader, fake_httpx):
         # The conversion runs once on the combined DataFrame.
         fake_httpx.route('*', FakeResponse(make_daily_info_rows()))
-        df = loader.fetch_v2_data(loader.url, self.params(), ['uid-aaa'], True, 60.0)
+        df = loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa'], True, 60.0)
         assert df.index.name == 'local_time'

@@ -37,8 +37,11 @@ fixed.
 | --- | --- |
 | `getDailyData()` and `getDetailData()` are removed. | Use `getDailyInfoV2(start_date, end_date, uid_list=[...])` and `getDailyDataV2(start_datetime, end_datetime, uid_list=[...])`. `uid_list` is required, there is no implicit "my own data". |
 | `add_uid_filter_to_flux_query()` is removed. | No replacement, it only built Flux queries. |
+| `post_process_data()` is private. It was a step of the fetch pipeline rather than a feature, and its result is tied to what the v2 endpoints return. | Pass `convert_to_local_time=True` to the v2 methods, which is what it was called for. |
 | The v2 endpoints do not return `_start`, `_stop`, `_measurement`, `year`, `month`, `year_week` or `workday`. | Derive what you need from `_time`, which carries an explicit offset. |
 | `convert_to_local_time` and `timeout` are keyword only on both v2 methods. A positional `timeout`, which used to be the fourth argument, now raises `TypeError`. | Pass it by keyword: `getDailyInfoV2(..., timeout=120.0)`. |
+| A range longer than 366 days raises `ValueError` on both v2 methods. Such a range used to be sent and answered with `400`, which the library reported as "no data" by returning `None`. | Ask for at most `soxai_data.MAX_RANGE_DAYS` (366) days at a time. |
+| The v2 methods raise when no uid answered with data and at least one request failed. `None` now means the api answered without data. | Catch `httpx.HTTPStatusError`, and the transport errors of `httpx`, wherever a `None` used to stand for a failed request. |
 | `getMyInfo()` and `getMyOrgUsers()` raise `httpx.HTTPStatusError` on an error status instead of returning the error body. | Catch it if you inspected the error body before. An invalid token now fails loudly. |
 | With `convert_to_local_time=True` the `local_time` index is timezone naive. It used to be labelled `+00:00` while holding local wall clock time. | Remove any `tz_convert()` on the index. The values themselves are unchanged. |
 | `soxai_data.get_ave_data.InfluxDb` is renamed to `SoxaiWebApi`, and `initialize_dataloder()` to `initialize_dataloader()`. | Update the import. `AverageDataExecutor` is unchanged. |
@@ -86,23 +89,38 @@ fixed.
 - `getRawData()` never returned data: it sent Flux literals as its range and decoded the
   payload twice. It now also reports http error statuses, not only transport failures.
 - `getDailyInfoV2()` raised an opaque `TypeError` when given a `datetime` object.
-- `post_process_data()` raised `KeyError` on v2 responses, which do not carry the columns
-  it removed, and modified the DataFrame it was given.
+- `convert_to_local_time=True` raised `KeyError` on v2 responses, which do not carry the
+  columns the conversion removed. The conversion, `post_process_data()` before it became
+  private, also modified the DataFrame it was given.
 - `AverageDataExecutor`:
   - could not fetch anything at all, because the api was called with `uid_list` and
     `convert_to_local_time` swapped and with a `datetime` where a date string was needed;
+  - asked for every day since 2022-03-01 in one request, which the api answers with
+    `400` because the range exceeds 366 days, so no uid could be fetched even once the
+    call above was corrected. A run now covers the newest 366 days, which keeps it at one
+    request per uid and makes the averages reach 366 days back instead of to 2022-03-01;
   - silently dropped every period after a period without data, so a user who stopped
     wearing the ring for a month lost all later averages;
   - treated the end of its daily time window as "all uids processed" and stopped the
     scheduler for good, instead of carrying the remaining uids over to the next run;
   - aborted every remaining uid when one uid could not be processed;
+  - retried a uid the api rejects for good, an unknown uid or an expired token among
+    them, on every run of the schedule. A `4xx` now ends the schedule at the end of the
+    run it happened in, while a `5xx`, a timeout or a connection error still earns a
+    retry;
   - produced no output when the api returned timestamps without a timezone;
+  - named its output files after the second the run started, so two runs started inside
+    the same second wrote over each other's results while reporting success. The names
+    now carry milliseconds;
   - rejected a processing window that crosses midnight, such as `22:00` to `02:00`;
   - accepted a malformed `"hh:mm"` window by silently disabling the time restriction;
   - looped forever when `period_cnt` was below 1;
   - kept `execute_scheduler()` running for good when a uid held no data or kept failing,
-    because such a uid was carried over to the next run every day. The scheduler now also
-    stops when a run reached every uid of its input and none of them yielded data.
+    because such a uid was carried over to the next run every day. The scheduler now
+    stops after `AverageDataExecutor.MAX_FRUITLESS_RUNS` (three) runs in a row that
+    produced no data at all, which covers a uid that holds no data, a uid that keeps
+    failing and a time window too short to reach any data. A run that produced nothing is
+    still retried until that budget runs out, because an api failure can be transient.
 - Text fields such as `sleep_start_time_true` no longer appear as columns of `NaN` in the
   averaged output.
 

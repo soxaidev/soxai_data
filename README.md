@@ -199,12 +199,13 @@ Retrieves daily info data from the SOXAI v2 API for the specified users and date
   It is keyword only because it used to be the fourth positional argument; passing it positionally now raises `TypeError` instead of silently setting `convert_to_local_time`.
 
 **Returns:**
-`pandas.DataFrame`: A DataFrame containing the retrieved data, or `None` if no data could be fetched.
-A uid whose request fails is reported and skipped, so the data of the remaining uids is still returned.
+`pandas.DataFrame`: A DataFrame containing the retrieved data, or `None` if the API answered without data for every uid.
+A uid whose request fails is reported and skipped, so the data of the remaining uids is still returned. When no uid answered with data and at least one request failed, that failure is raised instead of being reported as `None`.
 
 **Raises:**
-`ValueError`: If a date argument cannot be read as a date or datetime, or `start_date` is after `end_date`.  
-`TypeError`: If `convert_to_local_time` or `timeout` is passed positionally.
+`ValueError`: If a date argument cannot be read as a date or datetime, if `start_date` is after `end_date`, or if the range covers more than `MAX_RANGE_DAYS` (366) days.  
+`TypeError`: If `convert_to_local_time` or `timeout` is passed positionally.  
+`httpx.HTTPStatusError`: If no uid answered with data and the API answered with an error status.
 
 ### `DataLoader.getDailyDataV2(start_datetime, end_datetime, uid_list=None, *, convert_to_local_time=False, timeout=60.0)`
 
@@ -220,12 +221,13 @@ Unlike `getDailyInfoV2`, this method keeps the time of day, enabling hour-level 
   It is keyword only because it used to be the fourth positional argument; passing it positionally now raises `TypeError` instead of silently setting `convert_to_local_time`.
 
 **Returns:**
-`pandas.DataFrame`: A DataFrame containing the retrieved data, or `None` if no data could be fetched.
-A uid whose request fails is reported and skipped, so the data of the remaining uids is still returned.
+`pandas.DataFrame`: A DataFrame containing the retrieved data, or `None` if the API answered without data for every uid.
+A uid whose request fails is reported and skipped, so the data of the remaining uids is still returned. When no uid answered with data and at least one request failed, that failure is raised instead of being reported as `None`.
 
 **Raises:**
-`ValueError`: If a datetime argument cannot be read as a date or datetime, or `start_datetime` is not before `end_datetime`.  
-`TypeError`: If `convert_to_local_time` or `timeout` is passed positionally.
+`ValueError`: If a datetime argument cannot be read as a date or datetime, if `start_datetime` is not before `end_datetime`, or if the range covers more than `MAX_RANGE_DAYS` (366) days.  
+`TypeError`: If `convert_to_local_time` or `timeout` is passed positionally.  
+`httpx.HTTPStatusError`: If no uid answered with data and the API answered with an error status.
 
 ## Development
 
