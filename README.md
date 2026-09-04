@@ -186,7 +186,7 @@ Retrieves the raw sensor data of one user within the specified date range.
 **Returns:**  
 `pandas.DataFrame`: A DataFrame containing the retrieved data, or `None` if the request failed.
 
-### `DataLoader.getDailyInfoV2(start_date=None, end_date=None, uid_list=None, convert_to_local_time=False, timeout=60.0)`
+### `DataLoader.getDailyInfoV2(start_date=None, end_date=None, uid_list=None, *, convert_to_local_time=False, timeout=60.0)`
 
 Retrieves daily info data from the SOXAI v2 API for the specified users and date range.
 
@@ -194,17 +194,19 @@ Retrieves daily info data from the SOXAI v2 API for the specified users and date
 - `start_date` (optional): The start date of the data range, e.g. `2026-01-20`. See [Timezone Handling](#timezone-handling). Defaults to 7 days before the current UTC date.
 - `end_date` (optional): The end date of the data range. Defaults to the current UTC date.
 - `uid_list` (list): List of uids to fetch data for.
-- `convert_to_local_time` (bool, optional): Whether to index the result by the `local_time` wall clock. Defaults to False.
-- `timeout` (float, optional): Timeout in seconds. Defaults to 60.0. (Up to 120.0)
+- `convert_to_local_time` (bool, optional, keyword only): Whether to index the result by the `local_time` wall clock. Defaults to False.
+- `timeout` (float, optional, keyword only): Timeout in seconds. Defaults to 60.0. (Up to 120.0)
+  It is keyword only because it used to be the fourth positional argument; passing it positionally now raises `TypeError` instead of silently setting `convert_to_local_time`.
 
 **Returns:**
 `pandas.DataFrame`: A DataFrame containing the retrieved data, or `None` if no data could be fetched.
 A uid whose request fails is reported and skipped, so the data of the remaining uids is still returned.
 
 **Raises:**
-`ValueError`: If a date argument cannot be read as a date or datetime, or `start_date` is after `end_date`.
+`ValueError`: If a date argument cannot be read as a date or datetime, or `start_date` is after `end_date`.  
+`TypeError`: If `convert_to_local_time` or `timeout` is passed positionally.
 
-### `DataLoader.getDailyDataV2(start_datetime, end_datetime, uid_list=None, convert_to_local_time=False, timeout=60.0)`
+### `DataLoader.getDailyDataV2(start_datetime, end_datetime, uid_list=None, *, convert_to_local_time=False, timeout=60.0)`
 
 Retrieves daily detail data from the SOXAI v2 API for the specified users and datetime range.
 Unlike `getDailyInfoV2`, this method keeps the time of day, enabling hour-level data retrieval.
@@ -213,15 +215,17 @@ Unlike `getDailyInfoV2`, this method keeps the time of day, enabling hour-level 
 - `start_datetime`: The start of the datetime range, e.g. `2026-01-20T00:00:00+09:00`. See [Timezone Handling](#timezone-handling).
 - `end_datetime`: The end of the datetime range, e.g. `2026-01-20T02:00:00+09:00`.
 - `uid_list` (list): List of uids to fetch data for.
-- `convert_to_local_time` (bool, optional): Whether to index the result by the `local_time` wall clock. Defaults to False.
-- `timeout` (float, optional): Timeout in seconds. Defaults to 60.0. (Up to 120.0)
+- `convert_to_local_time` (bool, optional, keyword only): Whether to index the result by the `local_time` wall clock. Defaults to False.
+- `timeout` (float, optional, keyword only): Timeout in seconds. Defaults to 60.0. (Up to 120.0)
+  It is keyword only because it used to be the fourth positional argument; passing it positionally now raises `TypeError` instead of silently setting `convert_to_local_time`.
 
 **Returns:**
 `pandas.DataFrame`: A DataFrame containing the retrieved data, or `None` if no data could be fetched.
 A uid whose request fails is reported and skipped, so the data of the remaining uids is still returned.
 
 **Raises:**
-`ValueError`: If a datetime argument cannot be read as a date or datetime, or `start_datetime` is not before `end_datetime`.
+`ValueError`: If a datetime argument cannot be read as a date or datetime, or `start_datetime` is not before `end_datetime`.  
+`TypeError`: If `convert_to_local_time` or `timeout` is passed positionally.
 
 ## Development
 

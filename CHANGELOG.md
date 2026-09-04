@@ -20,8 +20,9 @@ How to add a release
    exactly that version, so the two must match.
 5. Add the compare link at the bottom of this file.
 
-The release workflow copies the section of the version it publishes into the GitHub
-release notes, and refuses to release a version that has no section here.
+The release workflow refuses to release a version that has no section here. The GitHub
+release notes themselves are generated from the merged pull requests, so this file is the
+only place the migration steps are written down.
 -->
 
 ## [0.1.0] - 2026-09-08 (planned)
@@ -37,7 +38,7 @@ fixed.
 | `getDailyData()` and `getDetailData()` are removed. | Use `getDailyInfoV2(start_date, end_date, uid_list=[...])` and `getDailyDataV2(start_datetime, end_datetime, uid_list=[...])`. `uid_list` is required, there is no implicit "my own data". |
 | `add_uid_filter_to_flux_query()` is removed. | No replacement, it only built Flux queries. |
 | The v2 endpoints do not return `_start`, `_stop`, `_measurement`, `year`, `month`, `year_week` or `workday`. | Derive what you need from `_time`, which carries an explicit offset. |
-| `convert_to_local_time` was inserted before `timeout` on both v2 methods. A positional `timeout` now lands in the wrong parameter. | Pass it by keyword: `getDailyInfoV2(..., timeout=120.0)`. |
+| `convert_to_local_time` and `timeout` are keyword only on both v2 methods. A positional `timeout`, which used to be the fourth argument, now raises `TypeError`. | Pass it by keyword: `getDailyInfoV2(..., timeout=120.0)`. |
 | `getMyInfo()` and `getMyOrgUsers()` raise `httpx.HTTPStatusError` on an error status instead of returning the error body. | Catch it if you inspected the error body before. An invalid token now fails loudly. |
 | With `convert_to_local_time=True` the `local_time` index is timezone naive. It used to be labelled `+00:00` while holding local wall clock time. | Remove any `tz_convert()` on the index. The values themselves are unchanged. |
 | `soxai_data.get_ave_data.InfluxDb` is renamed to `SoxaiWebApi`, and `initialize_dataloder()` to `initialize_dataloader()`. | Update the import. `AverageDataExecutor` is unchanged. |
@@ -98,8 +99,11 @@ fixed.
   - produced no output when the api returned timestamps without a timezone;
   - rejected a processing window that crosses midnight, such as `22:00` to `02:00`;
   - accepted a malformed `"hh:mm"` window by silently disabling the time restriction;
-  - looped forever when `period_cnt` was below 1.
+  - looped forever when `period_cnt` was below 1;
+  - kept `execute_scheduler()` running for good when a uid held no data or kept failing,
+    because such a uid was carried over to the next run every day. The scheduler now also
+    stops when a run reached every uid of its input and none of them yielded data.
 - Text fields such as `sleep_start_time_true` no longer appear as columns of `NaN` in the
   averaged output.
 
-[0.1.0]: https://github.com/soxaidev/soxai_data/compare/main...feat/delete_querydata_endpoint
+[0.1.0]: https://github.com/soxaidev/soxai_data/compare/v0.0.4...v0.1.0

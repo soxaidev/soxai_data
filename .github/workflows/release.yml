@@ -45,36 +45,20 @@ jobs:
             exit 1
           fi
 
-      - name: Extract the release notes from CHANGELOG.md
+      - name: Fail if CHANGELOG.md has no section for the version
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          awk -v needle="## [$VERSION]" '
-            index($0, needle) == 1 { found = 1; next }
-            found && index($0, "## [") == 1 { exit }
-            found && $0 ~ /^\[[^]]+\]:/ { exit }
-            found { print }
-          ' CHANGELOG.md | awk 'NF || started { started = 1; print }' > release_notes.md
-          if ! grep -q '[^[:space:]]' release_notes.md; then
+          if ! awk -v needle="## [$VERSION]" '
+            index($0, needle) == 1 { found = 1 }
+            END { exit !found }
+          ' CHANGELOG.md; then
             echo "Error: CHANGELOG.md has no section for $VERSION." >&2
             echo "Add a '## [$VERSION] - YYYY-MM-DD' section before releasing." >&2
             exit 1
           fi
-          echo "Release notes for v$VERSION:"
-          cat release_notes.md
 
-      - name: Create and push tag
-        run: |
-          git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "v${{ steps.version.outputs.version }}" \
-            --title "v${{ steps.version.outputs.version }}" \
-            --notes-file release_notes.md
-
+      # everything that can still fail runs before the tag and the release are created,
+      # so that a failed run leaves nothing behind and can simply be run again
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -89,3 +73,20 @@ jobs:
 
       - name: Publish distribution 📦 to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # PyPI rejects a version it already holds, which would otherwise turn a rerun
+          # after a failure of one of the steps below into a dead end
+          skip-existing: true
+
+      - name: Create and push tag
+        run: |
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --generate-notes
