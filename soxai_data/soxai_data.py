@@ -28,7 +28,7 @@ class DataLoader():
         df.plot()
         ```
         """
-        self.url = 'https://soxai-firebase.df.r.appspot.com/api/'
+        self.url = 'https://web-api.soxai.site/api/'
         self.headers = {
             'Content-Type': 'text/plain',
             'soxai-api-key': token
