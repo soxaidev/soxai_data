@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "soxai_data"
-version = "0.0.3"
+version = "0.1.0"
 dependencies = [
   "httpx",
   "pandas",
@@ -36,7 +36,7 @@ Homepage = "https://soxai.co.jp"
 Documentation = "https://soxai.co.jp/docs"
 Repository = "https://github.com/soxaidev/soxai_data"
 "Bug Tracker" = "https://github.com/soxaidev/soxai_data/issues"
-Changelog = "https://github.com/soxaidev/soxai_data/blob/master/CHANGELOG.md"
+Changelog = "https://github.com/soxaidev/soxai_data/blob/main/CHANGELOG.md"
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

@@ -7,9 +7,8 @@ on:
 
 jobs:
   release:
-    name: Bump version, tag, and create release
+    name: Tag, release, and publish the version in pyproject.toml
     runs-on: ubuntu-latest
-    if: "!contains(github.event.head_commit.message, 'chore: bump version')"
     concurrency:
       group: release-${{ github.ref }}
       cancel-in-progress: false
@@ -26,8 +25,8 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get current version
-        id: current_version
+      - name: Read the version to release
+        id: version
         run: |
           VERSION=$(grep -E '^[[:space:]]*version[[:space:]]*=' pyproject.toml | sed -E 's/.*version[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')
           if [ -z "$VERSION" ]; then
@@ -35,38 +34,46 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Releasing v$VERSION as declared in pyproject.toml"
 
-      - name: Bump patch version
-        id: bump_version
+      - name: Fail if the version was already released
         run: |
-          CURRENT="${{ steps.current_version.outputs.version }}"
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-          NEW_PATCH=$((PATCH + 1))
-          NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
-          ESCAPED=$(echo "$CURRENT" | sed 's/\./\\./g')
-          sed -i "s/version = \"$ESCAPED\"/version = \"$NEW_VERSION\"/" pyproject.toml
-          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          TAG="v${{ steps.version.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Error: $TAG already exists. Bump the version in pyproject.toml and" >&2
+            echo "add the matching section to CHANGELOG.md before releasing again." >&2
+            exit 1
+          fi
 
-      - name: Commit version bump
+      - name: Extract the release notes from CHANGELOG.md
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml
-          git commit -m "chore: bump version to ${{ steps.bump_version.outputs.new_version }}"
-          git push
+          VERSION="${{ steps.version.outputs.version }}"
+          awk -v needle="## [$VERSION]" '
+            index($0, needle) == 1 { found = 1; next }
+            found && index($0, "## [") == 1 { exit }
+            found && $0 ~ /^\[[^]]+\]:/ { exit }
+            found { print }
+          ' CHANGELOG.md | awk 'NF || started { started = 1; print }' > release_notes.md
+          if ! grep -q '[^[:space:]]' release_notes.md; then
+            echo "Error: CHANGELOG.md has no section for $VERSION." >&2
+            echo "Add a '## [$VERSION] - YYYY-MM-DD' section before releasing." >&2
+            exit 1
+          fi
+          echo "Release notes for v$VERSION:"
+          cat release_notes.md
 
       - name: Create and push tag
         run: |
-          git tag "v${{ steps.bump_version.outputs.new_version }}"
-          git push origin "v${{ steps.bump_version.outputs.new_version }}"
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v${{ steps.bump_version.outputs.new_version }}" \
-            --title "v${{ steps.bump_version.outputs.new_version }}" \
-            --generate-notes
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --notes-file release_notes.md
 
       - name: Set up Python
         uses: actions/setup-python@v5
