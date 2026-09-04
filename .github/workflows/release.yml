@@ -7,9 +7,8 @@ on:
 
 jobs:
   release:
-    name: Bump version, tag, and create release
+    name: Tag, release, and publish the version in pyproject.toml
     runs-on: ubuntu-latest
-    if: "!contains(github.event.head_commit.message, 'chore: bump version')"
     concurrency:
       group: release-${{ github.ref }}
       cancel-in-progress: false
@@ -26,8 +25,8 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get current version
-        id: current_version
+      - name: Read the version to release
+        id: version
         run: |
           VERSION=$(grep -E '^[[:space:]]*version[[:space:]]*=' pyproject.toml | sed -E 's/.*version[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')
           if [ -z "$VERSION" ]; then
@@ -35,39 +34,31 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Releasing v$VERSION as declared in pyproject.toml"
 
-      - name: Bump patch version
-        id: bump_version
+      - name: Fail if the version was already released
         run: |
-          CURRENT="${{ steps.current_version.outputs.version }}"
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-          NEW_PATCH=$((PATCH + 1))
-          NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
-          ESCAPED=$(echo "$CURRENT" | sed 's/\./\\./g')
-          sed -i "s/version = \"$ESCAPED\"/version = \"$NEW_VERSION\"/" pyproject.toml
-          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          TAG="v${{ steps.version.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Error: $TAG already exists. Bump the version in pyproject.toml and" >&2
+            echo "add the matching section to CHANGELOG.md before releasing again." >&2
+            exit 1
+          fi
 
-      - name: Commit version bump
+      - name: Fail if CHANGELOG.md has no section for the version
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml
-          git commit -m "chore: bump version to ${{ steps.bump_version.outputs.new_version }}"
-          git push
+          VERSION="${{ steps.version.outputs.version }}"
+          if ! awk -v needle="## [$VERSION]" '
+            index($0, needle) == 1 { found = 1 }
+            END { exit !found }
+          ' CHANGELOG.md; then
+            echo "Error: CHANGELOG.md has no section for $VERSION." >&2
+            echo "Add a '## [$VERSION] - YYYY-MM-DD' section before releasing." >&2
+            exit 1
+          fi
 
-      - name: Create and push tag
-        run: |
-          git tag "v${{ steps.bump_version.outputs.new_version }}"
-          git push origin "v${{ steps.bump_version.outputs.new_version }}"
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "v${{ steps.bump_version.outputs.new_version }}" \
-            --title "v${{ steps.bump_version.outputs.new_version }}" \
-            --generate-notes
-
+      # everything that can still fail runs before the tag and the release are created,
+      # so that a failed run leaves nothing behind and can simply be run again
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -82,3 +73,20 @@ jobs:
 
       - name: Publish distribution 📦 to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # PyPI rejects a version it already holds, which would otherwise turn a rerun
+          # after a failure of one of the steps below into a dead end
+          skip-existing: true
+
+      - name: Create and push tag
+        run: |
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --generate-notes
