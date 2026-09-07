@@ -1,2 +1,4 @@
 pandas
 httpx
+schedule
+pytest
