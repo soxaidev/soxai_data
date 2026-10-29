@@ -670,11 +670,11 @@ class TestExecute:
         assert executor_env.web_api.get_daily_data_by_uid.call_count == 2
 
     def test_fetch_asks_for_the_longest_range_the_api_accepts(self, executor_env):
-        # The window is exactly MAX_RANGE_DAYS days, sent as 'YYYY-MM-DD' strings.
+        # The window covers exactly MAX_RANGE_DAYS inclusive days, sent as 'YYYY-MM-DD' strings.
         executor_env.executor.execute()
         sent = executor_env.web_api.get_daily_data_by_uid.call_args[1]
         span = pd.Timestamp(sent['end_date']) - pd.Timestamp(sent['start_date'])
-        assert span == pd.Timedelta(days=MAX_RANGE_DAYS)
+        assert span == pd.Timedelta(days=MAX_RANGE_DAYS - 1)
 
     def test_fetch_ends_on_the_day_of_the_run(self, executor_env):
         # Both ends come from the run's own clock, so a run that crosses midnight cannot

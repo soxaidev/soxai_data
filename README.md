@@ -214,7 +214,8 @@ Unlike `getDailyInfoV2`, this method keeps the time of day, enabling hour-level 
 
 **Parameters:**
 - `start_datetime`: The start of the datetime range, e.g. `2026-01-20T00:00:00+09:00`. See [Timezone Handling](#timezone-handling).
-- `end_datetime`: The end of the datetime range, e.g. `2026-01-20T02:00:00+09:00`.
+- `end_datetime`: The end of the datetime range, e.g. `2026-01-20T02:00:00+09:00`. A datetime is an exclusive end instant.
+  A date only value (`'2026-01-20'` or `datetime.date`) includes that whole UTC day and is sent as `YYYY-MM-DD`, so `getDailyDataV2('2026-01-20', '2026-01-20', ...)` reads one day.
 - `uid_list` (list): List of uids to fetch data for.
 - `convert_to_local_time` (bool, optional, keyword only): Whether to index the result by the `local_time` wall clock. Defaults to False.
 - `timeout` (float, optional, keyword only): Timeout in seconds. Defaults to 60.0. (Up to 120.0)
@@ -225,7 +226,7 @@ Unlike `getDailyInfoV2`, this method keeps the time of day, enabling hour-level 
 A uid whose request fails is reported and skipped, so the data of the remaining uids is still returned. When no uid answered with data and at least one request failed, that failure is raised instead of being reported as `None`.
 
 **Raises:**
-`ValueError`: If a datetime argument cannot be read as a date or datetime, if `start_datetime` is not before `end_datetime`, or if the range covers more than `MAX_RANGE_DAYS` (366) days.  
+`ValueError`: If a datetime argument cannot be read as a date or datetime, if `start_datetime` is not before `end_datetime` (or is after 00:00 UTC of a date only `end_datetime`, as the API checks), or if the range covers more than `MAX_RANGE_DAYS` (366) days (counted inclusively for a date only `end_datetime`).  
 `TypeError`: If `convert_to_local_time` or `timeout` is passed positionally.  
 `httpx.HTTPStatusError`: If no uid answered with data and the API answered with an error status.
 
