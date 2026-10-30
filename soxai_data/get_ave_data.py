@@ -182,8 +182,9 @@ class DataProcessing:
         )
         # coerce the object columns to numbers: fields such as sleep_start_time_true hold
         # a timestamp string and others are always None, and both become NaN here, which
-        # mean() skips (they are not counted as 0)
-        for column in df_fields.select_dtypes(include='object').columns:
+        # mean() skips (they are not counted as 0). pandas 3 holds strings in a 'string'
+        # dtype instead of object, and stops selecting it under 'object' in a later version
+        for column in df_fields.select_dtypes(include=['object', 'string']).columns:
             df_fields[column] = pd.to_numeric(df_fields[column], errors='coerce')
         # drop columns that hold no numeric value at all (e.g. free text fields)
         df_fields = df_fields.dropna(axis=1, how='all')

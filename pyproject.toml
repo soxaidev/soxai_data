@@ -10,7 +10,7 @@ dependencies = [
   "pandas",
   "schedule",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 authors = [
   {name = "SOXAI Inc.", email = "dev@soxai.co.jp"}
 ]
@@ -25,6 +25,11 @@ classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python"
 ]
+
+# list what the sdist ships instead of relying on .gitignore, so that local files that are
+# not tracked by git (notes, editor settings, credentials) can never end up on PyPI
+[tool.hatch.build.targets.sdist]
+include = ["soxai_data", "test", "README.md", "CHANGELOG.md", "LICENSE.txt"]
 
 [project.optional-dependencies]
 dev = [
