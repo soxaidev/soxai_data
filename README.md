@@ -12,7 +12,7 @@ pip install soxai_data
 
 ## Usage
 
-First, obtain your token by logging into the [SOXAI Platform](https://soxai-web-api-tiufu2wgva-df.a.run.app/). After logging in, generate your token and use it to load the data.
+First, obtain your token by logging into the [SOXAI Platform](https://web-api.soxai.site/login). After logging in, generate your token and use it to load the data.
 
 ### Timezone Handling
 

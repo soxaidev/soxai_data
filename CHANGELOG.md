@@ -47,6 +47,9 @@ fixed.
 | `soxai_data.get_ave_data.InfluxDb` is renamed to `SoxaiWebApi`, and `initialize_dataloder()` to `initialize_dataloader()`. | Update the import. `AverageDataExecutor` is unchanged. |
 | The `AverageDataExecutor` result csv no longer starts with an unnamed row number column. | Update readers that address columns by position. |
 | `schedule` is now a required dependency. | `pip install -U soxai_data`. |
+| Python 3.11 or newer is required. 3.9, which reached its end of life, and 3.10 are no longer supported. | Upgrade to Python 3.11 or newer. The library is tested on 3.11 and 3.14. |
+| With pandas 3, which Python 3.11 and newer install by default, text columns of every returned DataFrame (`uid`, `_time`, `sleep_start_time_true`, the user fields of `getMyOrgUsers()`, ...) have the `str` dtype instead of `object`, and a missing value in them is `NaN` instead of `None`. The values themselves are unchanged. | Test for a missing value with `pd.isna(value)` instead of `value is None`, which works with pandas 2 and 3 alike. Code that checks a dtype against `object` has to accept `str` as well. |
+| With pandas 3, datetime values (the `local_time` index of `convert_to_local_time=True`, the `start_date` and `end_date` of `AverageDataExecutor`) have microsecond resolution, `datetime64[us]`, instead of `datetime64[ns]`. The dates and times are unchanged. | Code that converts them to integers with `astype('int64')` now gets microseconds since the epoch, not nanoseconds. Use `Timestamp.timestamp()` for seconds, which is the same on both. |
 
 ### Added
 

@@ -310,6 +310,20 @@ def get_credential(name: str) -> Optional[str]:
     return os.environ.get(name) or read_env_file().get(name)
 
 
+def get_api_url() -> Optional[str]:
+    """
+    Read the api base url the integration tests connect to, if one is configured.
+
+    returns:
+        - SOXAI_API_URL ending with a slash, or None to keep the url of DataLoader
+    """
+    url = get_credential('SOXAI_API_URL')
+    if not url:
+        return None
+    # DataLoader appends the endpoint paths directly to its url
+    return url.rstrip('/') + '/'
+
+
 # the datetime range the integration tests know holds data
 INTEGRATION_START_DATETIME = '2026-09-03T00:00:00+09:00'
 INTEGRATION_END_DATETIME = '2026-09-05T00:00:00+09:00'

@@ -21,12 +21,40 @@ from conftest import (
     INTEGRATION_START_DATE,
     INTEGRATION_START_DATETIME,
     LEGACY_DAILY_INFO_COLUMNS,
+    get_api_url,
 )
 
 pytestmark = pytest.mark.integration
 
 # columns that carry no measurement, so anything else is a field to average
 NON_FIELD_COLUMNS = set(DAILY_INFO_COLUMNS)
+
+
+@pytest.fixture(scope='session', autouse=True)
+def api_url():
+    """
+    Point every DataLoader at SOXAI_API_URL when it is configured.
+
+    The patch is on DataLoader itself so that the loaders AverageDataExecutor builds
+    internally connect there as well. It is session scoped so that it is in place
+    before the session scoped live_loader is built.
+
+    returns:
+        - the configured url, or None when DataLoader keeps its own
+    """
+    url = get_api_url()
+    if url is None:
+        yield None
+        return
+    original_init = DataLoader.__init__
+
+    def init_with_api_url(self, token):
+        original_init(self, token)
+        self.url = url
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(DataLoader, '__init__', init_with_api_url)
+        yield url
 
 
 @pytest.fixture(scope='session')

@@ -180,6 +180,16 @@ class TestGetMyOrgUsers:
         df = loader.getMyOrgUsers(org_id='org-1')
         assert list(df['uid']) == ['uid-aaa', 'uid-bbb']
 
+    def test_missing_text_value_is_detected_by_isna(self, loader, fake_httpx):
+        # A missing text field is None on pandas 2 and NaN on pandas 3, and pd.isna,
+        # which the changelog tells callers to use, detects it on both.
+        fake_httpx.route('orgUsers', FakeResponse([
+            {'uid': 'uid-aaa', 'name': 'a'},
+            {'uid': 'uid-bbb', 'name': None},
+        ]))
+        df = loader.getMyOrgUsers(org_id='org-1')
+        assert list(pd.isna(df['name'])) == [False, True]
+
     def test_returns_none_when_the_payload_is_unreadable(self, loader, fake_httpx):
         # A body that is not json yields None instead of an exception.
         fake_httpx.route('orgUsers', FakeResponse(json_error=ValueError('not json')))
@@ -598,6 +608,27 @@ class TestFetchV2Data:
         fake_httpx.route('*', FakeResponse({'error': 'forbidden'}, status_code=403))
         with pytest.raises(httpx.HTTPStatusError):
             loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa'], False, 60.0)
+
+    def test_the_first_failure_is_raised_when_a_later_uid_raises(self, loader, fake_httpx):
+        # A later exception does not replace the failure of the first uid.
+        fake_httpx.route('uid-aaa', FakeResponse({'detail': 'Not Found'}))
+        fake_httpx.route('uid-bbb', httpx.ConnectError('boom'))
+        with pytest.raises(ValueError, match='uid-aaa'):
+            loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa', 'uid-bbb'], False, 60.0)
+
+    def test_the_first_failure_is_raised_when_a_later_uid_answers_a_dict(self, loader, fake_httpx):
+        # A later unexpected response does not replace the failure of the first uid.
+        fake_httpx.route('uid-aaa', httpx.ConnectError('boom'))
+        fake_httpx.route('uid-bbb', FakeResponse({'detail': 'Not Found'}))
+        with pytest.raises(httpx.ConnectError):
+            loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa', 'uid-bbb'], False, 60.0)
+
+    def test_text_columns_hold_a_string_dtype(self, loader, fake_httpx):
+        # uid and _time are object on pandas 2 and str on pandas 3, both string dtypes.
+        fake_httpx.route('*', FakeResponse(make_daily_info_rows()))
+        df = loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa'], False, 60.0)
+        assert pd.api.types.is_string_dtype(df['uid'])
+        assert pd.api.types.is_string_dtype(df['_time'])
 
     def test_returns_none_when_the_response_is_empty(self, loader, fake_httpx):
         # The api answers a range that holds nothing with 200 and an empty list, which is

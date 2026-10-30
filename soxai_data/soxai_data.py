@@ -77,7 +77,7 @@ class DataLoader:
 
         args:
             - token : the token used for authentication, please go to
-              https://soxai-web-api-tiufu2wgva-df.a.run.app/ and login to generate one token
+              https://web-api.soxai.site/login and login to generate one token
         """
         self.url = 'https://web-api.soxai.site/api/'
         self.headers = {

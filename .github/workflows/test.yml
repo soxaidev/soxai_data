@@ -25,8 +25,8 @@ jobs:
       # report every version that fails, not only the first one
       fail-fast: false
       matrix:
-        # the lowest version pyproject.toml supports, and the newest released one
-        python-version: ["3.9", "3.13"]
+        # the lowest version pyproject.toml supports, and the newest one it is tested on
+        python-version: ["3.11", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
