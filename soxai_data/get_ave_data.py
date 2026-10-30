@@ -465,10 +465,11 @@ class AverageDataExecutor:
         # MAX_RANGE_DAYS, and splitting it would cost one request per window per uid, so
         # a run covers the newest MAX_RANGE_DAYS days. both ends are taken from
         # start_datetime, so a run that crosses midnight cannot ask for one day too many.
-        # getDailyInfoV2 reads a date without timezone information as utc
+        # getDailyInfoV2 reads a date without timezone information as utc. both days are
+        # inclusive, so the start is MAX_RANGE_DAYS - 1 days before the end
         end_date = start_datetime.strftime('%Y-%m-%d')
         start_date = (
-            start_datetime - datetime.timedelta(days=MAX_RANGE_DAYS)
+            start_datetime - datetime.timedelta(days=MAX_RANGE_DAYS - 1)
         ).strftime('%Y-%m-%d')
 
         # the averages of every processed uid
