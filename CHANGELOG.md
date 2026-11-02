@@ -25,7 +25,7 @@ release notes themselves are generated from the merged pull requests, so this fi
 only place the migration steps are written down.
 -->
 
-## [0.1.0] - 2026-09-08 (planned)
+## [0.1.0] - 2026-11-02
 
 The InfluxDB based endpoints are replaced by the v2 web api, every date argument now
 follows one timezone rule, and several bugs that returned wrong or incomplete data are
@@ -45,9 +45,11 @@ fixed.
 | `getMyInfo()` and `getMyOrgUsers()` raise `httpx.HTTPStatusError` on an error status instead of returning the error body. | Catch it if you inspected the error body before. An invalid token now fails loudly. |
 | With `convert_to_local_time=True` the `local_time` index is timezone naive. It used to be labelled `+00:00` while holding local wall clock time. | Remove any `tz_convert()` on the index. The values themselves are unchanged. |
 | `soxai_data.get_ave_data.InfluxDb` is renamed to `SoxaiWebApi`, and `initialize_dataloder()` to `initialize_dataloader()`. | Update the import. `AverageDataExecutor` is unchanged. |
+| `SoxaiWebApi.get_daily_data_by_uid()` returns an empty DataFrame instead of `None` when the api answered without data. `None` now only means a failure a later run may get past. | Test for no data with `len(df) == 0` (or `df.empty`) instead of `df is None`. |
 | The `AverageDataExecutor` result csv no longer starts with an unnamed row number column. | Update readers that address columns by position. |
 | `schedule` is now a required dependency. | `pip install -U soxai_data`. |
-| Python 3.11 or newer is required. 3.9, which reached its end of life, and 3.10 are no longer supported. | Upgrade to Python 3.11 or newer. The library is tested on 3.11 and 3.14. |
+| pandas 2.0 or newer is required. | Upgrade pandas, which `pip install -U soxai_data` does for you. |
+| Python 3.11 or newer is required. 3.8 and 3.9, which reached their end of life, and 3.10 are no longer supported. | Upgrade to Python 3.11 or newer. The library is tested on 3.11 and 3.14. |
 | With pandas 3, which Python 3.11 and newer install by default, text columns of every returned DataFrame (`uid`, `_time`, `sleep_start_time_true`, the user fields of `getMyOrgUsers()`, ...) have the `str` dtype instead of `object`, and a missing value in them is `NaN` instead of `None`. The values themselves are unchanged. | Test for a missing value with `pd.isna(value)` instead of `value is None`, which works with pandas 2 and 3 alike. Code that checks a dtype against `object` has to accept `str` as well. |
 | With pandas 3, datetime values (the `local_time` index of `convert_to_local_time=True`, the `start_date` and `end_date` of `AverageDataExecutor`) have microsecond resolution, `datetime64[us]`, instead of `datetime64[ns]`. The dates and times are unchanged. | Code that converts them to integers with `astype('int64')` now gets microseconds since the epoch, not nanoseconds. Use `Timestamp.timestamp()` for seconds, which is the same on both. |
 
@@ -95,6 +97,9 @@ fixed.
 - `getRawData()` never returned data: it sent Flux literals as its range and decoded the
   payload twice. It now also reports http error statuses, not only transport failures.
 - `getDailyInfoV2()` raised an opaque `TypeError` when given a `datetime` object.
+- `getDailyDataV2()` sent a range shorter than one second, such as `00:00:00.100Z` to
+  `00:00:00.900Z`, with the same start and end, because the fraction was dropped only
+  after the range was checked. It now raises `ValueError`.
 - `convert_to_local_time=True` raised `KeyError` on v2 responses, which do not carry the
   columns the conversion removed. The conversion, `post_process_data()` before it became
   private, also modified the DataFrame it was given.
@@ -111,9 +116,9 @@ fixed.
     scheduler for good, instead of carrying the remaining uids over to the next run;
   - aborted every remaining uid when one uid could not be processed;
   - retried a uid the api rejects for good, an unknown uid or an expired token among
-    them, on every run of the schedule. A `4xx` now ends the schedule at the end of the
-    run it happened in, while a `5xx`, a timeout or a connection error still earns a
-    retry;
+    them, on every run of the schedule. Such a uid is now written to the failed csv only
+    and is not carried over to the next run, while a `5xx`, a `408`, a `429`, a timeout or
+    a connection error still earns a retry;
   - produced no output when the api returned timestamps without a timezone;
   - named its output files after the second the run started, so two runs started inside
     the same second wrote over each other's results while reporting success. The names
@@ -122,11 +127,12 @@ fixed.
   - accepted a malformed `"hh:mm"` window by silently disabling the time restriction;
   - looped forever when `period_cnt` was below 1;
   - kept `execute_scheduler()` running for good when a uid held no data or kept failing,
-    because such a uid was carried over to the next run every day. The scheduler now
-    stops after `AverageDataExecutor.MAX_FRUITLESS_RUNS` (three) runs in a row that
-    produced no data at all, which covers a uid that holds no data, a uid that keeps
-    failing and a time window too short to reach any data. A run that produced nothing is
-    still retried until that budget runs out, because an api failure can be transient.
+    because such a uid was carried over to the next run every day. A uid that holds no
+    data is now treated as processed and is no longer carried over. The scheduler stops
+    after `AverageDataExecutor.MAX_FRUITLESS_RUNS` (three) runs in a row that produced no
+    data at all, which covers a uid that keeps failing and a time window too short to
+    reach any data. A run that produced nothing is still retried until that budget runs
+    out, because an api failure can be transient.
   - left a one day gap between two consecutive averaging periods, so a day whose
     timestamp did not fall at the same time of day as the first one, after a timezone
     change or a dst transition, was left out of every period and averaged into nothing;
