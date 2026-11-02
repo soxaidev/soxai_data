@@ -18,6 +18,10 @@ import schedule
 
 from .soxai_data import DataLoader, MAX_RANGE_DAYS
 
+# 4xx statuses that tell the client to come back later (request timeout and too many
+# requests) rather than that the request itself is wrong
+RETRYABLE_CLIENT_STATUS_CODES = frozenset({408, 429})
+
 
 class CsvFile:
     """Read and write the csv files used by AverageDataExecutor."""
@@ -98,11 +102,12 @@ class SoxaiWebApi:
             - uid_list : the uids to fetch the data for
             - timeout : the timeout in seconds
         returns:
-            - the fetched DataFrame, or None if the api answered without data or failed in
-              a way a later run may get past
+            - the fetched DataFrame, an empty DataFrame if the api answered without data,
+              or None if the request failed in a way a later run may get past
         raises:
-            - httpx.HTTPStatusError : if the api answered with a 4xx status. The same
-              request keeps getting that answer, so the caller must not retry it
+            - httpx.HTTPStatusError : if the api answered with a 4xx status other than
+              408 and 429. The same request keeps getting that answer, so the caller must
+              not retry it
         """
         if uid_list is None:
             uid_list = []
@@ -115,14 +120,21 @@ class SoxaiWebApi:
                 convert_to_local_time=convert_to_local_time,
                 timeout=timeout,
             )
+            # getDailyInfoV2 raises when a request fails, so None only means that the
+            # api answered without data, which a retry for the same range would answer
+            # the same way
+            if df is None:
+                return pd.DataFrame()
             return df
         except httpx.HTTPStatusError as e:
-            if e.response.status_code < 500:
+            status_code = e.response.status_code
+            if status_code < 500 and status_code not in RETRYABLE_CLIENT_STATUS_CODES:
                 # a bad request, a bad token, a missing permission or an unknown uid, all
                 # of which answer the same way however often they are asked
                 print(f'the web api rejected the request  {e}')
                 raise
-            # the api failed on its own side, which a later run may get past
+            # the api failed on its own side or asked to come back later, which a later
+            # run may get past
             print(f'failed to get data from the web api  {e}')
             return None
         except Exception as e:
@@ -419,6 +431,12 @@ class AverageDataExecutor:
         - <prefix>_not_processed_uid.csv : the uids left over, written only if any
         - <prefix>_failed_uid.csv : the uids that failed, written only if any
 
+        A uid the api answers without data, or rejects with a 4xx other than 408 and 429,
+        would get the same answer for this run's range on a retry, so it counts as
+        processed and is not left over. A run that continues on a later day therefore
+        does not ask again for a uid that had no data in the earlier range, even if data
+        arrived for it since. A rejected uid is still written to the failed file.
+
         When uids are left over, input_file is repointed at the not processed csv so that
         the next run continues with them instead of starting over. task_executed, which is
         what stops execute_scheduler, is set once every uid has been processed, and also
@@ -426,9 +444,9 @@ class AverageDataExecutor:
 
         - the run saw every uid of its input, produced no data and hit nothing that a
           later run could get past, so a repeat would do the same work for the same
-          result. A uid the api rejects with a 4xx counts as answered for good here
+          result
         - MAX_FRUITLESS_RUNS runs in a row produced no data while hitting something a
-          later run might have got past, a 5xx or a closing time window
+          later run might have got past, a 5xx, a 408, a 429 or a closing time window
 
         The leftover uids stay in the not processed and failed files either way.
 
@@ -476,6 +494,9 @@ class AverageDataExecutor:
         df_result_list = []
         # the uids whose data could not be fetched or processed
         failed_processed_uid_list = []
+        # the uids a retry for this range would answer the same way: no data, or rejected
+        # for good
+        settled_uid_list = []
 
         csv_file = CsvFile()
         soxai_web_api = SoxaiWebApi(self.api_key)
@@ -508,6 +529,7 @@ class AverageDataExecutor:
                 # the api rejected this uid for good, so retrying it cannot help. the
                 # uids after it are unaffected and still worth fetching
                 failed_processed_uid_list.append(uid)
+                settled_uid_list.append(uid)
                 print(f'the web api rejected uid {uid} : {e}')
                 continue
             if df is None:
@@ -518,6 +540,8 @@ class AverageDataExecutor:
                 print('failed_get_from_web_api')
                 continue
             if len(df) < 1:
+                # the api answered without data, which is not a failure
+                settled_uid_list.append(uid)
                 continue
             try:
                 df_result = data_processing.get_average_datas(df, start_datetime, self.period_cnt)
@@ -528,13 +552,18 @@ class AverageDataExecutor:
                 continue
             df_result_list.append(df_result)
 
+        processed_uid_list = list(settled_uid_list)
         if df_result_list:
             df_all_results = pd.concat(df_result_list, axis=0)
             # write the averages sorted by uid and start_date
             csv_file.write_csv_sort_index(df_all_results, output_file_path)
-            df_not_processed_uid = df_uid_list[~df_uid_list['UID list'].isin(df_all_results['uid'])]
-        else:
-            df_not_processed_uid = df_uid_list
+            processed_uid_list.extend(df_all_results['uid'])
+        # read_csv turns numeric looking uids into numbers while the api answers with
+        # strings, so compare both as strings
+        processed_uids = {str(uid) for uid in processed_uid_list}
+        df_not_processed_uid = df_uid_list[
+            ~df_uid_list['UID list'].astype(str).isin(processed_uids)
+        ]
 
         # spend a retry on a run that produced nothing, and give the budget back as soon
         # as a run produces something, so that only a stuck situation exhausts it
@@ -554,8 +583,9 @@ class AverageDataExecutor:
             # both of the cases below, which is what stops execute_scheduler
             if reached_every_uid and not df_result_list and not transient_failure:
                 # every uid of the input was seen, none of them produced data and nothing
-                # went wrong that a later run could get past, so a repeat would do exactly
-                # the same work for exactly the same result
+                # went wrong that a later run could get past. the uids without data or
+                # rejected for good are settled already, so the ones left over failed in
+                # processing, which a repeat would fail the same way
                 print(
                     'nothing left that another run could fetch, giving up on '
                     f'{len(df_not_processed_uid)} uids'
@@ -563,7 +593,8 @@ class AverageDataExecutor:
                 self.task_executed = True
             elif self.fruitless_run_cnt >= self.MAX_FRUITLESS_RUNS:
                 # the runs that produced nothing did hit something a later run might have
-                # got past, a 5xx or a closing time window, but not often enough to keep
+                # got past, a 5xx, a 408, a 429 or a closing time window, but not often
+                # enough to keep
                 # trying for good
                 print(
                     f'{self.fruitless_run_cnt} runs produced no data, giving up on '
@@ -589,8 +620,9 @@ class AverageDataExecutor:
         A run that goes past schedule_end_time stops and hands its remaining uids to the
         run of the next day, so the loop can span several days. It also ends as soon as a
         run cannot be usefully repeated, and after MAX_FRUITLESS_RUNS runs in a row that
-        produced no data, so that uids the api rejects, uids that hold no data and uids a
-        5xx keeps failing do not keep the loop alive forever.
+        produced no data. A uid the api answers without data, or rejects with a 4xx other
+        than 408 and 429, counts as processed in the run that saw it, and uids a 5xx, a
+        408 or a 429 keeps failing do not keep the loop alive forever.
 
         args:
             - schedule_start_time : time of day the run starts, in "hh:mm" format
