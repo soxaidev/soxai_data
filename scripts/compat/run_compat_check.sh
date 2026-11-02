@@ -18,6 +18,9 @@
 # usage: scripts/compat/run_compat_check.sh [BASE_VERSION] [NEW_VERSION]
 #        (defaults: 3.11 3.14, the versions CI tests. both have to satisfy requires-python.
 #        SOXAI_API_TOKEN, SOXAI_UID and optionally SOXAI_API_URL enable the live checks)
+#
+# The live checks write real health data to .compat/. Do not share or commit it, and
+# delete .compat/ once the comparison is done.
 
 set -uo pipefail
 

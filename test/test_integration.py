@@ -7,6 +7,8 @@ authenticate, so that a normal `pytest` run never depends on the network. Run th
 with `pytest -m integration` once the credentials are in place.
 """
 
+from unittest import mock
+
 import httpx
 import pandas as pd
 import pytest
@@ -356,8 +358,9 @@ class TestAverageDataExecutorEndToEnd:
         assert executor.task_executed is True
         assert not list(tmp_path.glob('*_not_processed_uid.csv'))
 
-    def test_an_unknown_uid_is_carried_over(self, api_token, api_uid, tmp_path, live_loader):
-        # A uid the api cannot answer is left for the next run.
+    def test_an_unknown_uid_is_not_carried_over(self, api_token, api_uid, tmp_path,
+                                                live_loader):
+        # An unknown uid gets the same answer on every run, so it is not carried over.
         input_file = tmp_path / 'input_uid.csv'
         pd.DataFrame({'UID list': ['this-uid-does-not-exist', api_uid]}).to_csv(
             input_file, index=False
@@ -366,11 +369,8 @@ class TestAverageDataExecutorEndToEnd:
         executor = AverageDataExecutor(api_token, 30, str(input_file), str(tmp_path))
         executor.execute()
 
-        leftover = sorted(tmp_path.glob('*_not_processed_uid.csv'))
-        assert len(leftover) == 1
-        assert list(pd.read_csv(leftover[0])['UID list']) == ['this-uid-does-not-exist']
-        assert executor.task_executed is False
-        assert executor.input_file == str(leftover[0])
+        assert not list(tmp_path.glob('*_not_processed_uid.csv'))
+        assert executor.task_executed is True
 
     def test_a_run_outside_its_window_writes_nothing(self, api_token, api_uid, tmp_path):
         # The time window is checked before anything is fetched or written.
@@ -378,6 +378,8 @@ class TestAverageDataExecutorEndToEnd:
         pd.DataFrame({'UID list': [api_uid]}).to_csv(input_file, index=False)
 
         executor = AverageDataExecutor(api_token, 30, str(input_file), str(tmp_path))
-        executor.execute(process_start_time='00:00', process_end_time='00:01')
+        # the real clock could be inside any window, so the check is pinned outside of it
+        with mock.patch.object(AverageDataExecutor, 'within_time_range', return_value=False):
+            executor.execute(process_start_time='00:00', process_end_time='00:01')
 
         assert list(tmp_path.glob('*.csv')) == [input_file]

@@ -176,6 +176,25 @@ class TestSoxaiWebApi:
             got = SoxaiWebApi('my-key').get_daily_data_by_uid(uid_list=['uid-aaa'])
         assert got is expected
 
+    def test_no_data_returns_an_empty_frame(self):
+        # No data comes back as an empty frame so that it stays apart from a failure.
+        with mock.patch.object(get_ave_data, 'DataLoader') as loader_class:
+            loader_class.return_value.getDailyInfoV2.return_value = None
+            got = SoxaiWebApi('my-key').get_daily_data_by_uid(uid_list=['uid-aaa'])
+        assert isinstance(got, pd.DataFrame)
+        assert got.empty
+
+    @pytest.mark.parametrize('status_code', [408, 429])
+    def test_a_come_back_later_status_returns_none(self, status_code, capsys):
+        # A 408 or 429 asks the client to retry later, so it is not a rejection.
+        with mock.patch.object(get_ave_data, 'DataLoader') as loader_class:
+            loader_class.return_value.getDailyInfoV2.side_effect = make_http_status_error(
+                status_code
+            )
+            got = SoxaiWebApi('my-key').get_daily_data_by_uid(uid_list=['uid-aaa'])
+        assert got is None
+        assert 'failed to get data' in capsys.readouterr().out
+
     def test_failure_returns_none(self, capsys):
         # An error a later run may get past is reported and yields None.
         with mock.patch.object(get_ave_data, 'DataLoader') as loader_class:
@@ -669,20 +688,42 @@ class TestExecute:
         executor_env.executor.execute()
         assert executor_env.web_api.get_daily_data_by_uid.call_count == 2
 
+    @staticmethod
+    def run_at(utc_now):
+        """
+        Patch the clock execute() reads its start time from.
+
+        args:
+            - utc_now : the aware utc datetime the run starts at
+        returns:
+            - a context manager that applies the patch
+        """
+        fake = mock.Mock(wraps=datetime)
+        fake.datetime.now.return_value = utc_now
+        fake.timedelta = datetime.timedelta
+        fake.timezone = datetime.timezone
+        fake.time = datetime.time
+        return mock.patch.object(get_ave_data, 'datetime', fake)
+
     def test_fetch_asks_for_the_longest_range_the_api_accepts(self, executor_env):
         # The window covers exactly MAX_RANGE_DAYS inclusive days, sent as 'YYYY-MM-DD' strings.
-        executor_env.executor.execute()
+        utc_now = datetime.datetime(2026, 9, 4, 12, 0, tzinfo=datetime.timezone.utc)
+        with self.run_at(utc_now):
+            executor_env.executor.execute()
         sent = executor_env.web_api.get_daily_data_by_uid.call_args[1]
+        assert sent['start_date'] == '2025-09-04'
+        assert sent['end_date'] == '2026-09-04'
         span = pd.Timestamp(sent['end_date']) - pd.Timestamp(sent['start_date'])
         assert span == pd.Timedelta(days=MAX_RANGE_DAYS - 1)
 
-    def test_fetch_ends_on_the_day_of_the_run(self, executor_env):
-        # Both ends come from the run's own clock, so a run that crosses midnight cannot
-        # ask for a range the api rejects. The file prefix carries that same clock.
-        executor_env.executor.execute()
+    def test_fetch_ends_on_the_utc_day_of_the_run(self, executor_env):
+        # 00:30 utc is still the previous day in some timezones, but the range follows utc.
+        utc_now = datetime.datetime(2026, 9, 4, 0, 30, tzinfo=datetime.timezone.utc)
+        with self.run_at(utc_now):
+            executor_env.executor.execute()
         sent = executor_env.web_api.get_daily_data_by_uid.call_args[1]
-        day = written_paths(executor_env.csv_file)[0].split('/')[-1][:8]
-        assert sent['end_date'] == f'{day[:4]}-{day[4:6]}-{day[6:8]}'
+        assert sent['end_date'] == '2026-09-04'
+        assert written_paths(executor_env.csv_file)[0].split('/')[-1].startswith('20260904003000')
 
     def test_fetch_asks_for_one_uid_at_a_time(self, executor_env):
         # The averaging is per uid, so the uids are fetched separately.
@@ -778,6 +819,23 @@ class TestExecute:
         executor_env.executor.execute()
         assert not any('failed_uid' in p for p in written_paths(executor_env.csv_file))
 
+    def test_a_uid_without_data_is_not_carried_over(self, executor_env):
+        # A later run would get the same empty answer, so the uid counts as processed.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = [
+            make_rows([0]).iloc[0:0], make_rows([0, 1], uid='uid-bbb'),
+        ]
+        executor_env.executor.execute()
+        assert not any('not_processed' in p for p in written_paths(executor_env.csv_file))
+        assert executor_env.executor.task_executed is True
+
+    def test_a_pass_without_any_data_stops_the_scheduler_at_once(self, executor_env):
+        # No uid holds data, so the scheduler does not spend its retries on them.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = None
+        executor_env.web_api.get_daily_data_by_uid.return_value = make_rows([0]).iloc[0:0]
+        executor_env.executor.execute()
+        assert executor_env.executor.task_executed is True
+        assert written_paths(executor_env.csv_file) == []
+
     def test_leaving_the_window_stops_the_loop(self, executor_env):
         # The loop breaks as soon as the window closes.
         answers = iter([True, True, False])
@@ -823,7 +881,106 @@ class TestExecute:
         executor_env.web_api.get_daily_data_by_uid.side_effect = make_http_status_error(403)
         executor_env.executor.execute()
         assert executor_env.executor.task_executed is True
+        assert not any('not_processed' in p for p in written_paths(executor_env.csv_file))
+
+    def test_a_rejected_uid_is_not_carried_over_next_to_a_result(self, executor_env):
+        # A rejected uid next to a success is not repeated, since it would fail again.
+        executor_env.web_api.get_daily_data_by_uid.side_effect = [
+            make_http_status_error(404), make_rows([0, 1], uid='uid-bbb'),
+        ]
+        executor_env.executor.execute()
+        assert executor_env.executor.task_executed is True
+        assert not any('not_processed' in p for p in written_paths(executor_env.csv_file))
+        failed = [c[0][0] for c in executor_env.csv_file.write_df_csv.call_args_list
+                  if 'failed_uid' in c[0][1]]
+        assert list(failed[0]['UID list']) == ['uid-aaa']
+
+    def test_a_truncated_pass_carries_over_only_the_unreached_uids(self, executor_env):
+        # Only the uid the run never reached is handed to the next run.
+        executor_env.csv_file.read_csv_df.return_value = pd.DataFrame(
+            {'UID list': ['uid-aaa', 'uid-bbb', 'uid-ccc']}
+        )
+        executor_env.web_api.get_daily_data_by_uid.side_effect = [
+            make_rows([0]).iloc[0:0], make_http_status_error(404),
+        ]
+        answers = iter([True, True, True, False])
+        with mock.patch.object(AverageDataExecutor, 'within_time_range',
+                               side_effect=lambda *a: next(answers)):
+            executor_env.executor.execute('09:00', '18:00')
+        leftover = [c[0][0] for c in executor_env.csv_file.write_df_csv.call_args_list
+                    if 'not_processed' in c[0][1]]
+        assert list(leftover[0]['UID list']) == ['uid-ccc']
+        assert executor_env.executor.task_executed is False
+
+    def test_numeric_uids_from_the_csv_match_the_string_uids_of_the_api(self, executor_env):
+        # A uid read_csv parsed as a number still counts as processed once the api answered.
+        executor_env.csv_file.read_csv_df.return_value = pd.DataFrame({'UID list': [101, 202]})
+        executor_env.web_api.get_daily_data_by_uid.side_effect = lambda **kwargs: make_rows(
+            [0, 1], uid=str(kwargs['uid_list'][0])
+        )
+        executor_env.executor.execute()
+        assert executor_env.executor.task_executed is True
+        assert not any('not_processed' in p for p in written_paths(executor_env.csv_file))
+
+    def test_a_processing_failure_alone_does_not_earn_a_retry(self, executor_env, capsys):
+        # Processing failed for every uid without anything a later run could get past.
+        executor_env.processing.get_average_datas.side_effect = RuntimeError('boom')
+        executor_env.executor.execute()
+        assert executor_env.executor.task_executed is True
         assert 'nothing left that another run could fetch' in capsys.readouterr().out
+        leftover = [c[0][0] for c in executor_env.csv_file.write_df_csv.call_args_list
+                    if 'not_processed' in c[0][1]]
+        assert list(leftover[0]['UID list']) == ['uid-aaa', 'uid-bbb']
+        failed = [c[0][0] for c in executor_env.csv_file.write_df_csv.call_args_list
+                  if 'failed_uid' in c[0][1]]
+        assert list(failed[0]['UID list']) == ['uid-aaa', 'uid-bbb']
+
+    @pytest.fixture
+    def real_web_api(self, executor_env, monkeypatch):
+        """
+        Use the real SoxaiWebApi with only its DataLoader mocked.
+
+        returns:
+            - the mocked DataLoader instance whose getDailyInfoV2 answers each uid
+        """
+        monkeypatch.setattr(get_ave_data, 'SoxaiWebApi', SoxaiWebApi)
+        loader_class = mock.Mock()
+        monkeypatch.setattr(get_ave_data, 'DataLoader', loader_class)
+        return loader_class.return_value
+
+    @pytest.mark.parametrize('status_code', [408, 429, 500, 503])
+    def test_a_come_back_later_answer_is_carried_over(self, executor_env, real_web_api,
+                                                      status_code):
+        # A uid the api asked to retry later is kept for the next run, which is then due.
+        real_web_api.getDailyInfoV2.side_effect = [
+            make_http_status_error(status_code), make_rows([0, 1], uid='uid-bbb'),
+        ]
+        executor_env.executor.execute()
+        leftover = [c[0][0] for c in executor_env.csv_file.write_df_csv.call_args_list
+                    if 'not_processed' in c[0][1]]
+        assert list(leftover[0]['UID list']) == ['uid-aaa']
+        assert executor_env.executor.task_executed is False
+
+    @pytest.mark.parametrize('status_code', [408, 429, 500])
+    def test_come_back_later_answers_alone_spend_the_retry_budget(
+            self, executor_env, real_web_api, status_code):
+        # Runs that only hit retryable answers keep going until the budget runs out.
+        real_web_api.getDailyInfoV2.side_effect = make_http_status_error(status_code)
+        for _ in range(AverageDataExecutor.MAX_FRUITLESS_RUNS - 1):
+            executor_env.executor.execute()
+            assert executor_env.executor.task_executed is False
+        executor_env.executor.execute()
+        assert executor_env.executor.task_executed is True
+
+    @pytest.mark.parametrize('answer', [None, 'rejected'])
+    def test_a_settled_answer_through_the_api_is_not_carried_over(
+            self, executor_env, real_web_api, answer):
+        # No data and a lasting 4xx both settle the uid once they pass the api layer.
+        first = make_http_status_error(404) if answer == 'rejected' else None
+        real_web_api.getDailyInfoV2.side_effect = [first, make_rows([0, 1], uid='uid-bbb')]
+        executor_env.executor.execute()
+        assert not any('not_processed' in p for p in written_paths(executor_env.csv_file))
+        assert executor_env.executor.task_executed is True
 
     def test_a_rejected_uid_is_recorded_as_failed(self, executor_env):
         # Giving up on the uid still has to leave it on disk for a human to look at.

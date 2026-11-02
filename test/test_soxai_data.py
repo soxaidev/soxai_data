@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from soxai_data import DataLoader
-from soxai_data.soxai_data import _format_span, _to_aware_timestamp
+from soxai_data.soxai_data import MAX_RANGE_DAYS, _format_span, _to_aware_timestamp
 
 from conftest import (
     FakeResponse,
@@ -499,6 +499,53 @@ class TestGetDailyDataV2:
         with pytest.raises(ValueError, match='must be before'):
             loader.getDailyDataV2('2026-09-03T00:00:00Z', '2026-09-03T00:00:00Z',
                                   uid_list=['uid-aaa'])
+
+    def test_a_range_within_one_second_raises(self, loader, fake_httpx):
+        # Both ends fall on the same second once the fraction is dropped, so it is empty.
+        with pytest.raises(ValueError, match='must be before'):
+            loader.getDailyDataV2('2026-09-03T00:00:00.100Z', '2026-09-03T00:00:00.900Z',
+                                  uid_list=['uid-aaa'])
+        assert fake_httpx.calls == []
+
+    def test_a_range_across_a_second_boundary_is_allowed(self, loader, fake_httpx):
+        # The ends fall on different seconds, so a non empty range is still sent.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        loader.getDailyDataV2('2026-09-03T00:00:00.900Z', '2026-09-03T00:00:01.100Z',
+                              uid_list=['uid-aaa'])
+        assert fake_httpx.last_params['start_day'] == '2026-09-03T00:00:00+00:00'
+        assert fake_httpx.last_params['end_day'] == '2026-09-03T00:00:01+00:00'
+
+    @pytest.mark.parametrize('utc_start, expected', [
+        ('2025-11-02T05:30:00.500Z', '2025-11-02T01:30:00-04:00'),
+        ('2025-11-02T06:30:00Z', '2025-11-02T01:30:00-05:00'),
+    ])
+    def test_the_repeated_hour_of_dst_keeps_its_offset(self, loader, fake_httpx,
+                                                        utc_start, expected):
+        # Dropping the fraction in New York's repeated 01:30 keeps the start's offset.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        start = pd.Timestamp(utc_start).tz_convert('America/New_York')
+        loader.getDailyDataV2(start, '2025-11-03T00:00:00Z', uid_list=['uid-aaa'])
+        assert fake_httpx.last_params['start_day'] == expected
+
+    @pytest.mark.parametrize('utc_end, expected', [
+        ('2025-11-02T05:30:00.500Z', '2025-11-02T01:30:00-04:00'),
+        ('2025-11-02T06:30:00.500Z', '2025-11-02T01:30:00-05:00'),
+    ])
+    def test_the_end_drops_its_fraction_and_keeps_its_offset(self, loader, fake_httpx,
+                                                             utc_end, expected):
+        # The end is sent as whole seconds with the offset of its own 01:30.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        end = pd.Timestamp(utc_end).tz_convert('America/New_York')
+        loader.getDailyDataV2('2025-11-01T00:00:00Z', end, uid_list=['uid-aaa'])
+        assert fake_httpx.last_params['end_day'] == expected
+
+    def test_the_range_limit_is_checked_on_whole_seconds(self, loader, fake_httpx):
+        # A range of exactly MAX_RANGE_DAYS once the fractions are dropped is accepted.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        start = pd.Timestamp('2025-01-01T00:00:00.500Z')
+        end = start + pd.Timedelta(days=MAX_RANGE_DAYS, milliseconds=400)
+        loader.getDailyDataV2(start, end, uid_list=['uid-aaa'])
+        assert fake_httpx.last_params['start_day'] == '2025-01-01T00:00:00+00:00'
 
     def test_start_after_end_raises(self, loader, fake_httpx):
         # An inverted range is a caller error.
