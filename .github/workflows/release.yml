@@ -28,26 +28,75 @@ jobs:
       - name: Read the version to release
         id: version
         run: |
-          VERSION=$(grep -E '^[[:space:]]*version[[:space:]]*=' pyproject.toml | sed -E 's/.*version[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')
-          if [ -z "$VERSION" ]; then
+          # read project.version itself, not every line that looks like a version key
+          if ! VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])'); then
             echo "Error: Failed to parse version from pyproject.toml" >&2
+            exit 1
+          fi
+          # the version ends up in shell commands, tags and urls, so only a plain version
+          # string is let through. it also has to be in the normalized form PyPI stores,
+          # otherwise the PyPI check below would look up a url PyPI never answers with 200
+          if ! [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?$ ]]; then
+            echo "Error: '$VERSION' is not a normalized version such as 1.2.0 or 1.2.0rc1" >&2
             exit 1
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Releasing v$VERSION as declared in pyproject.toml"
 
-      - name: Fail if the version was already released
+      # the tag is pushed before the publish and works as the lock on the version: only
+      # the commit it points at may publish that version. a tag on this very commit is
+      # what a run that failed after pushing it leaves behind, so the run goes on and
+      # finishes that release. a tag anywhere else means the version belongs to another
+      # commit.
+      #
+      # if the publish keeps failing and the fix needs a new commit, delete the tag
+      # (git push --delete origin vX.Y.Z) before pushing that commit to release
+      - name: Fail if the version was released from another commit
+        id: tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          TAG="v${{ steps.version.outputs.version }}"
+          TAG="v$VERSION"
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            echo "Error: $TAG already exists. Bump the version in pyproject.toml and" >&2
-            echo "add the matching section to CHANGELOG.md before releasing again." >&2
+            if [ "$(git rev-parse "$TAG^{commit}")" != "$(git rev-parse HEAD)" ]; then
+              echo "Error: $TAG already exists on another commit. Bump the version in" >&2
+              echo "pyproject.toml and add the matching section to CHANGELOG.md before" >&2
+              echo "releasing again." >&2
+              exit 1
+            fi
+            echo "$TAG already points at this commit, finishing that release"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      # without a tag, the version must not be on PyPI yet. otherwise skip-existing would
+      # turn the publish into a no-op and the tag below would point at a commit other
+      # than the one PyPI holds. since the tag is pushed before the publish, every
+      # publish of this workflow leaves a tag, so a version on PyPI without one was
+      # uploaded some other way
+      - name: Fail if the version is on PyPI without a tag
+        if: steps.tag.outputs.exists != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # -L follows the redirect PyPI answers with when the url does not use the
+          # project's canonical name. a network error leaves STATUS at 000 and fails below
+          STATUS=$(curl -sL --retry 3 --max-time 30 -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/soxai_data/$VERSION/json" || true)
+          if [ "$STATUS" = "200" ]; then
+            echo "Error: $VERSION is on PyPI already but v$VERSION is not tagged." >&2
+            echo "Tag the commit PyPI was published from, or bump the version." >&2
+            exit 1
+          fi
+          if [ "$STATUS" != "404" ]; then
+            echo "Error: could not check PyPI for $VERSION (HTTP $STATUS)." >&2
             exit 1
           fi
 
       - name: Fail if CHANGELOG.md has no section for the version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
           if ! awk -v needle="## [$VERSION]" '
             index($0, needle) == 1 { found = 1 }
             END { exit !found }
@@ -56,37 +105,65 @@ jobs:
             echo "Add a '## [$VERSION] - YYYY-MM-DD' section before releasing." >&2
             exit 1
           fi
+          # the section is marked ` (planned)` until the version ships, so a release of
+          # a section still marked that way means the changelog was not finished
+          if awk -v needle="## [$VERSION]" '
+            index($0, needle) == 1 && index($0, "(planned)") { found = 1 }
+            END { exit !found }
+          ' CHANGELOG.md; then
+            echo "Error: the CHANGELOG.md section for $VERSION is still marked (planned)." >&2
+            exit 1
+          fi
 
-      # everything that can still fail runs before the tag and the release are created,
-      # so that a failed run leaves nothing behind and can simply be run again
+      # everything that can still fail runs before anything is pushed or published. the
+      # steps from the tag on skip what an earlier run already did, so a run that failed
+      # among them can simply be run again
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          # the newest version test.yml covers, so the gate runs on a tested version
+          python-version: "3.14"
+
+      - name: Run the offline test suite
+        # a push to release does not trigger test.yml, so the tests gate the publish here.
+        # addopts in pyproject.toml deselects the integration tests
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pytest
 
       - name: Build distribution 📦
         run: |
-          python3 -m pip install --upgrade pip
-          pip install -r requirements.txt
           pip install build
           python3 -m build
+
+      # pushed before the publish so that it claims the version for this commit. the push
+      # is rejected when the tag appeared on the remote in the meantime, which stops the
+      # run before it publishes
+      - name: Create and push tag
+        if: steps.tag.outputs.exists != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git tag "v$VERSION"
+          git push origin "refs/tags/v$VERSION"
 
       - name: Publish distribution 📦 to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           # PyPI rejects a version it already holds, which would otherwise turn a rerun
-          # after a failure of one of the steps below into a dead end
+          # after a failure of the step below into a dead end. the tag on this commit
+          # guarantees that what PyPI holds was published from this commit
           skip-existing: true
-
-      - name: Create and push tag
-        run: |
-          git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          gh release create "v${{ steps.version.outputs.version }}" \
-            --title "v${{ steps.version.outputs.version }}" \
-            --generate-notes
+          TAG="v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "The GitHub Release for $TAG already exists"
+            exit 0
+          fi
+          gh release create "$TAG" --title "$TAG" --generate-notes
