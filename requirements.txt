@@ -1,4 +1,4 @@
-pandas
+pandas>=2.0
 httpx
 schedule
-pytest
+pytest>=7.0

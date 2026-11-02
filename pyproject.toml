@@ -7,7 +7,7 @@ name = "soxai_data"
 version = "0.1.0"
 dependencies = [
   "httpx",
-  "pandas",
+  "pandas>=2.0",
   "schedule",
 ]
 requires-python = ">=3.11"
