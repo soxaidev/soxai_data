@@ -1,2 +1,4 @@
-pandas
+pandas>=2.0
 httpx
+schedule
+pytest>=7.0
