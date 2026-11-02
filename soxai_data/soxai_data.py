@@ -88,6 +88,24 @@ def _as_date_only(value: DateLike) -> Optional[datetime.date]:
     return None
 
 
+def _drop_fraction_of_second(timestamp: pd.Timestamp) -> pd.Timestamp:
+    """
+    Drop the fraction of a second while keeping the instant's offset.
+
+    Timestamp.floor rounds the wall clock time and localizes it again, which raises on
+    the repeated hour at the end of daylight saving time. Subtracting the fraction never
+    leaves the instant line, so the offset stays as it was.
+
+    args:
+        - timestamp : the timezone aware timestamp
+    returns:
+        - the timestamp at the start of its second, with the same offset
+    """
+    return timestamp - pd.Timedelta(
+        microseconds=timestamp.microsecond, nanoseconds=timestamp.nanosecond
+    )
+
+
 def _format_span(span: pd.Timedelta) -> str:
     """
     Format a span as e.g. '366 days 1 hour', leaving out the units that are zero.
@@ -367,7 +385,8 @@ class DataLoader:
               without data
         raises:
             - ValueError : if a datetime argument cannot be read as a date or datetime, if
-              start_datetime is not before end_datetime (or is after 00:00 utc of a date
+              start_datetime is not before end_datetime once the fractions of a second,
+              which the api ignores, are dropped (or is after 00:00 utc of a date
               only end_datetime), or if the range covers more than MAX_RANGE_DAYS days
             - TypeError : if convert_to_local_time or timeout is passed positionally
             - httpx.HTTPStatusError : if no uid answered with data and the api answered
@@ -381,8 +400,15 @@ class DataLoader:
         # this endpoint works with instants, so each argument is read with the shared
         # timezone rule: without timezone information the value is read as utc, and with
         # timezone information that offset is followed
-        start_timestamp = _to_aware_timestamp(start_datetime, 'start_datetime')
-        end_timestamp = _to_aware_timestamp(end_datetime, 'end_datetime')
+        # the api reads whole seconds, so the range is checked on the seconds that are
+        # sent. otherwise a range shorter than a second would pass and reach the api with
+        # the same start and end
+        start_timestamp = _drop_fraction_of_second(
+            _to_aware_timestamp(start_datetime, 'start_datetime')
+        )
+        end_timestamp = _drop_fraction_of_second(
+            _to_aware_timestamp(end_datetime, 'end_datetime')
+        )
 
         start_day = _as_date_only(start_datetime)
         end_day = _as_date_only(end_datetime)

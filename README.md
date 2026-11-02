@@ -226,7 +226,7 @@ Unlike `getDailyInfoV2`, this method keeps the time of day, enabling hour-level 
 A uid whose request fails is reported and skipped, so the data of the remaining uids is still returned. When no uid answered with data and at least one request failed, that failure is raised instead of being reported as `None`.
 
 **Raises:**
-`ValueError`: If a datetime argument cannot be read as a date or datetime, if `start_datetime` is not before `end_datetime` (or is after 00:00 UTC of a date only `end_datetime`, as the API checks), or if the range covers more than `MAX_RANGE_DAYS` (366) days (counted inclusively for a date only `end_datetime`).  
+`ValueError`: If a datetime argument cannot be read as a date or datetime, if `start_datetime` is not before `end_datetime` once the fractions of a second, which the API ignores, are dropped (or is after 00:00 UTC of a date only `end_datetime`, as the API checks), or if the range covers more than `MAX_RANGE_DAYS` (366) days (counted inclusively for a date only `end_datetime`).  
 `TypeError`: If `convert_to_local_time` or `timeout` is passed positionally.  
 `httpx.HTTPStatusError`: If no uid answered with data and the API answered with an error status.
 
