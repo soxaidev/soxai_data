@@ -40,7 +40,7 @@ fixed.
 | `post_process_data()` is private. It was a step of the fetch pipeline rather than a feature, and its result is tied to what the v2 endpoints return. | Pass `convert_to_local_time=True` to the v2 methods, which is what it was called for. |
 | The v2 endpoints do not return `_start`, `_stop`, `_measurement`, `year`, `month`, `year_week` or `workday`. | Derive what you need from `_time`, which carries an explicit offset. |
 | `convert_to_local_time` and `timeout` are keyword only on both v2 methods. A positional `timeout`, which used to be the fourth argument, now raises `TypeError`. | Pass it by keyword: `getDailyInfoV2(..., timeout=120.0)`. |
-| A range longer than 366 days raises `ValueError` on both v2 methods. Such a range used to be sent and answered with `400`, which the library reported as "no data" by returning `None`. | Ask for at most `soxai_data.MAX_RANGE_DAYS` (366) days at a time. |
+| A range longer than 366 days raises `ValueError` on both v2 methods. Such a range used to be sent and answered with `400`, which the library reported as "no data" by returning `None`. The days of `getDailyInfoV2()` and a date only `end_datetime` of `getDailyDataV2()` are counted inclusively in whole days as the api does, even with a datetime `start_datetime`, and a datetime range of `getDailyDataV2()` must not be longer than exactly 366 days, so even 366 days and one hour raises. | Ask for at most `soxai_data.MAX_RANGE_DAYS` (366) days at a time. |
 | The v2 methods raise when no uid answered with data and at least one request failed. `None` now means the api answered without data. | Catch `httpx.HTTPStatusError`, and the transport errors of `httpx`, wherever a `None` used to stand for a failed request. |
 | `getMyInfo()` and `getMyOrgUsers()` raise `httpx.HTTPStatusError` on an error status instead of returning the error body. | Catch it if you inspected the error body before. An invalid token now fails loudly. |
 | With `convert_to_local_time=True` the `local_time` index is timezone naive. It used to be labelled `+00:00` while holding local wall clock time. | Remove any `tz_convert()` on the index. The values themselves are unchanged. |
@@ -65,7 +65,10 @@ fixed.
   ```
 
   `getDailyInfoV2()` works in day units, so an offset selects the calendar day as seen at
-  that offset. `getDailyDataV2()` works with instants and always sends an explicit offset.
+  that offset. `getDailyDataV2()` works with instants and sends a datetime with an
+  explicit offset. A date only value (`'2026-09-03'` or `datetime.date`) is a whole UTC
+  day there and is sent as `YYYY-MM-DD`, so a date only `end_datetime` includes its day
+  and `getDailyDataV2('2026-09-03', '2026-09-03', ...)` reads that day.
   A value that cannot be read as a date raises `ValueError` naming the argument.
 - **`convert_to_local_time` on both v2 methods**, indexing the result by `local_time`.
 - **One failing uid no longer discards the others.** The failed uids are reported and the

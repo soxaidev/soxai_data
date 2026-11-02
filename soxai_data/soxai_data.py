@@ -7,6 +7,7 @@ account, organization, daily and raw data endpoints as pandas DataFrames.
 
 import datetime
 import json
+import re
 from typing import Optional, Union
 
 import httpx
@@ -19,6 +20,10 @@ DateLike = Union[str, datetime.date]
 # the longest range the v2 endpoints accept. a longer one is answered with 400, so the
 # methods below refuse it before spending a request per uid on a known answer
 MAX_RANGE_DAYS = 366
+
+# the date only form the v2 api reads as a whole day. the api extends only this form of
+# end_day to the following midnight, so the same pattern decides it here
+_DATE_ONLY_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def _to_aware_timestamp(value: DateLike, arg_name: str) -> pd.Timestamp:
@@ -55,6 +60,48 @@ def _to_aware_timestamp(value: DateLike, arg_name: str) -> pd.Timestamp:
         return timestamp.tz_localize('UTC')
     # timezone information given, so follow that offset
     return timestamp
+
+
+def _as_date_only(value: DateLike) -> Optional[datetime.date]:
+    """
+    Read a date argument as a calendar day when it carries no time of day.
+
+    The v2 api treats a YYYY-MM-DD end_day as inclusive and a time-valued end_day as
+    an exclusive instant, so a date only argument has to reach the api in that form.
+
+    args:
+        - value : a date or datetime, as a string, datetime.date, datetime.datetime
+          or pandas.Timestamp
+    returns:
+        - the calendar day if value is a YYYY-MM-DD string or a datetime.date that is
+          not a datetime, otherwise None
+    raises:
+        - ValueError : if value has the YYYY-MM-DD form but is not a real date
+    """
+    if isinstance(value, datetime.datetime):
+        # pandas.Timestamp is a datetime as well, and both carry a time of day
+        return None
+    if isinstance(value, datetime.date):
+        return value
+    if isinstance(value, str) and _DATE_ONLY_PATTERN.fullmatch(value.strip()):
+        return datetime.date.fromisoformat(value.strip())
+    return None
+
+
+def _format_span(span: pd.Timedelta) -> str:
+    """
+    Format a span as e.g. '366 days 1 hour', leaving out the units that are zero.
+
+    args:
+        - span : the span to format
+    returns:
+        - the span in words
+    """
+    parts = []
+    for value, unit in zip(span.components[:4], ("day", "hour", "minute", "second")):
+        if value:
+            parts.append(f"{value} {unit}" + ("s" if value != 1 else ""))
+    return " ".join(parts)
 
 
 class DataLoader:
@@ -272,7 +319,8 @@ class DataLoader:
 
         # a longer range is rejected by the api, so it is a caller error rather than an
         # empty result. raising keeps the request that is certain to fail off the api
-        span_days = (pd.Timestamp(end_day) - pd.Timestamp(start_day)).days
+        # both days are inclusive, so the range covers one day more than their difference
+        span_days = (pd.Timestamp(end_day) - pd.Timestamp(start_day)).days + 1
         if span_days > MAX_RANGE_DAYS:
             raise ValueError(
                 f"the range of start_date({start_day}) and end_date({end_day}) covers "
@@ -301,10 +349,13 @@ class DataLoader:
         args:
             - start_datetime : the start of the datetime range, e.g.
               '2026-01-20T00:00:00+09:00'. Without timezone information it is read as utc,
-              and with timezone information that offset is followed. The request always
-              carries an explicit offset
+              and with timezone information that offset is followed. A date only value
+              ('2026-01-20' or datetime.date) is the start of that utc day and is sent as
+              YYYY-MM-DD; any other value is sent with an explicit offset
             - end_datetime : the end of the datetime range, read the same way as
-              start_datetime
+              start_datetime. A datetime is an exclusive end instant, while a date only
+              value includes that whole utc day, so the same date can be passed to both
+              arguments to read one day
             - uid_list : the uids to fetch data for
             - convert_to_local_time : keyword only, whether to convert the timestamps to
               local time
@@ -316,8 +367,8 @@ class DataLoader:
               without data
         raises:
             - ValueError : if a datetime argument cannot be read as a date or datetime, if
-              start_datetime is not before end_datetime, or if the range covers more than
-              MAX_RANGE_DAYS days
+              start_datetime is not before end_datetime (or is after 00:00 utc of a date
+              only end_datetime), or if the range covers more than MAX_RANGE_DAYS days
             - TypeError : if convert_to_local_time or timeout is passed positionally
             - httpx.HTTPStatusError : if no uid answered with data and the api answered
               with an error status
@@ -333,26 +384,57 @@ class DataLoader:
         start_timestamp = _to_aware_timestamp(start_datetime, 'start_datetime')
         end_timestamp = _to_aware_timestamp(end_datetime, 'end_datetime')
 
+        start_day = _as_date_only(start_datetime)
+        end_day = _as_date_only(end_datetime)
+
         # datetime range check (aware timestamps compare correctly across offsets)
-        if start_timestamp >= end_timestamp:
+        if end_day is not None:
+            # the api checks the order against the midnight that starts a date only end_day,
+            # before extending it, so a start later on that day is refused there as well
+            if start_timestamp > end_timestamp:
+                raise ValueError(
+                    f"start_datetime({start_datetime}) must not be after the start of "
+                    f"end_datetime({end_datetime})"
+                )
+            # the api then extends a date only end_day to the following midnight, so the
+            # limit check below uses the same exclusive end
+            end_timestamp = end_timestamp + pd.Timedelta(days=1)
+        elif start_timestamp >= end_timestamp:
             raise ValueError(
                 f"start_datetime({start_datetime}) must be before end_datetime({end_datetime})"
             )
 
         # a longer range is rejected by the api, so it is a caller error rather than an
-        # empty result. raising keeps the request that is certain to fail off the api
-        span_days = (end_timestamp - start_timestamp).days
-        if span_days > MAX_RANGE_DAYS:
+        # empty result. raising keeps the request that is certain to fail off the api.
+        # a date only end_day is counted in whole days, the same as the api does
+        span = end_timestamp - start_timestamp
+        span_days = span.days
+        if end_day is not None:
+            exceeds_limit = span_days > MAX_RANGE_DAYS
+            covered = f"{span_days} days"
+        else:
+            exceeds_limit = span > pd.Timedelta(days=MAX_RANGE_DAYS)
+            # show the whole span, since its days alone can equal the limit it exceeds
+            covered = _format_span(span)
+        if exceeds_limit:
             raise ValueError(
                 f"the range of start_datetime({start_datetime}) and "
-                f"end_datetime({end_datetime}) covers {span_days} days, which must not "
-                f"exceed {MAX_RANGE_DAYS}"
+                f"end_datetime({end_datetime}) covers {covered}, which must not "
+                f"exceed {MAX_RANGE_DAYS} days"
             )
 
-        # send an explicit offset so that the api never has to guess the timezone
+        # a date only argument is sent as YYYY-MM-DD so that the api reads end_day as
+        # inclusive. any other argument is sent with an explicit offset so that the api
+        # never has to guess the timezone
         params = {
-            "start_day": start_timestamp.isoformat(timespec='seconds'),
-            "end_day": end_timestamp.isoformat(timespec='seconds'),
+            "start_day": (
+                start_day.isoformat() if start_day is not None
+                else start_timestamp.isoformat(timespec='seconds')
+            ),
+            "end_day": (
+                end_day.isoformat() if end_day is not None
+                else end_timestamp.isoformat(timespec='seconds')
+            ),
             "format": "json",
         }
         return self._fetch_v2_data(url, params, uid_list, convert_to_local_time, timeout)

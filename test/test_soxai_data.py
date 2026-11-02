@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from soxai_data import DataLoader
-from soxai_data.soxai_data import _to_aware_timestamp
+from soxai_data.soxai_data import _format_span, _to_aware_timestamp
 
 from conftest import (
     FakeResponse,
@@ -384,11 +384,18 @@ class TestGetDailyInfoV2:
         assert fake_httpx.calls == []
 
     def test_a_range_at_the_api_limit_is_allowed(self, loader, fake_httpx):
-        # The limit itself is a valid range, so exactly 366 days still reaches the api.
+        # The limit itself is a valid range, so exactly 366 inclusive days still reaches the api.
         fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
-        loader.getDailyInfoV2(start_date='2025-09-04', end_date='2026-09-05',
+        loader.getDailyInfoV2(start_date='2025-09-05', end_date='2026-09-05',
                               uid_list=['uid-aaa'])
         assert len(fake_httpx.calls) == 1
+
+    def test_one_day_over_the_api_limit_raises(self, loader, fake_httpx):
+        # Both days are inclusive, so 367 days is refused like the api does.
+        with pytest.raises(ValueError, match='covers 367 days'):
+            loader.getDailyInfoV2(start_date='2025-09-04', end_date='2026-09-05',
+                                  uid_list=['uid-aaa'])
+        assert fake_httpx.calls == []
 
     def test_same_day_range_is_allowed(self, loader, fake_httpx):
         # A single day range is valid.
@@ -514,12 +521,119 @@ class TestGetDailyDataV2:
                               uid_list=['uid-aaa'])
         assert len(fake_httpx.calls) == 1
 
+    def test_a_datetime_range_just_over_the_api_limit_raises(self, loader, fake_httpx):
+        # A datetime end is an instant, so even one hour past 366 days is refused.
+        with pytest.raises(ValueError, match='covers 366 days 1 hour,'):
+            loader.getDailyDataV2('2025-09-04T00:00:00Z', '2026-09-05T01:00:00Z',
+                                  uid_list=['uid-aaa'])
+        assert fake_httpx.calls == []
+
     def test_order_is_compared_across_offsets(self, loader, fake_httpx):
         # 00:00+09:00 is 15:00 utc of the day before, so this range is valid.
         fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
         loader.getDailyDataV2('2026-09-03T00:00:00+09:00', '2026-09-02T20:00:00+00:00',
                               uid_list=['uid-aaa'])
         assert len(fake_httpx.calls) == 1
+
+    def test_date_only_arguments_are_sent_as_dates(self, loader, fake_httpx):
+        # A date only argument reaches the api as YYYY-MM-DD so that end_day is inclusive.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        loader.getDailyDataV2('2026-09-03', '2026-09-05', uid_list=['uid-aaa'])
+        assert fake_httpx.last_params['start_day'] == '2026-09-03'
+        assert fake_httpx.last_params['end_day'] == '2026-09-05'
+
+    def test_same_date_range_is_allowed(self, loader, fake_httpx):
+        # The same date on both sides reads that whole day.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        loader.getDailyDataV2('2026-09-03', '2026-09-03', uid_list=['uid-aaa'])
+        assert fake_httpx.last_params['start_day'] == '2026-09-03'
+        assert fake_httpx.last_params['end_day'] == '2026-09-03'
+
+    def test_date_objects_are_sent_as_dates(self, loader, fake_httpx):
+        # datetime.date carries no time of day, so it is treated like a YYYY-MM-DD string.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        loader.getDailyDataV2(datetime.date(2026, 9, 3), datetime.date(2026, 9, 3),
+                              uid_list=['uid-aaa'])
+        assert fake_httpx.last_params['start_day'] == '2026-09-03'
+        assert fake_httpx.last_params['end_day'] == '2026-09-03'
+
+    def test_surrounding_whitespace_of_a_date_is_stripped(self, loader, fake_httpx):
+        # The api strips whitespace before matching YYYY-MM-DD, and so does the client.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        loader.getDailyDataV2(' 2026-09-03 ', '2026-09-03 ', uid_list=['uid-aaa'])
+        assert fake_httpx.last_params['start_day'] == '2026-09-03'
+        assert fake_httpx.last_params['end_day'] == '2026-09-03'
+
+    def test_datetime_objects_keep_the_time(self, loader, fake_httpx):
+        # datetime.datetime and pandas.Timestamp are not date only even at midnight.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        loader.getDailyDataV2(datetime.datetime(2026, 9, 3), pd.Timestamp('2026-09-05'),
+                              uid_list=['uid-aaa'])
+        assert fake_httpx.last_params['start_day'] == '2026-09-03T00:00:00+00:00'
+        assert fake_httpx.last_params['end_day'] == '2026-09-05T00:00:00+00:00'
+
+    def test_date_with_offset_is_sent_as_a_datetime(self, loader, fake_httpx):
+        # Only the bare YYYY-MM-DD form is date only; a form the api refuses is not passed through.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        loader.getDailyDataV2('2026-09-03T00:00:00+09:00', '2026-09-05T00:00:00+09:00',
+                              uid_list=['uid-aaa'])
+        assert fake_httpx.last_params['end_day'] == '2026-09-05T00:00:00+09:00'
+
+    def test_datetime_start_later_on_a_date_only_end_day_raises(self, loader, fake_httpx):
+        # The api compares the start with 00:00 utc of a date only end, so 12:00 that day is refused.
+        with pytest.raises(ValueError, match='must not be after'):
+            loader.getDailyDataV2('2026-09-03T12:00:00Z', '2026-09-03', uid_list=['uid-aaa'])
+        assert fake_httpx.calls == []
+
+    def test_datetime_start_at_the_midnight_of_a_date_only_end_is_allowed(
+            self, loader, fake_httpx):
+        # A start equal to 00:00 utc of a date only end passes the api order check.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        loader.getDailyDataV2('2026-09-03T00:00:00Z', '2026-09-03', uid_list=['uid-aaa'])
+        assert fake_httpx.last_params['start_day'] == '2026-09-03T00:00:00+00:00'
+        assert fake_httpx.last_params['end_day'] == '2026-09-03'
+
+    def test_date_only_start_after_a_datetime_end_raises(self, loader, fake_httpx):
+        # A date only start is 00:00 utc of that day, which is after this end.
+        with pytest.raises(ValueError, match='must be before'):
+            loader.getDailyDataV2('2026-09-03', '2026-09-02T23:00:00Z', uid_list=['uid-aaa'])
+        assert fake_httpx.calls == []
+
+    def test_inverted_date_only_range_raises(self, loader, fake_httpx):
+        # An end date before the start date is a caller error.
+        with pytest.raises(ValueError, match='must not be after'):
+            loader.getDailyDataV2('2026-09-05', '2026-09-03', uid_list=['uid-aaa'])
+        assert fake_httpx.calls == []
+
+    def test_date_only_range_at_the_api_limit_is_allowed(self, loader, fake_httpx):
+        # 366 inclusive days is the longest date only range the api answers.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        loader.getDailyDataV2('2025-09-05', '2026-09-05', uid_list=['uid-aaa'])
+        assert len(fake_httpx.calls) == 1
+
+    def test_date_only_range_over_the_api_limit_raises(self, loader, fake_httpx):
+        # 367 inclusive days is refused before any request.
+        with pytest.raises(ValueError, match='covers 367 days'):
+            loader.getDailyDataV2('2025-09-04', '2026-09-05', uid_list=['uid-aaa'])
+        assert fake_httpx.calls == []
+
+    def test_datetime_start_with_date_only_end_at_the_api_limit_is_allowed(self, loader, fake_httpx):
+        # A date only end is counted in whole days like the api, so 366 days 12 hours passes.
+        fake_httpx.route('*', FakeResponse([make_daily_info_row()]))
+        loader.getDailyDataV2('2025-09-04T12:00:00Z', '2026-09-05', uid_list=['uid-aaa'])
+        assert len(fake_httpx.calls) == 1
+
+    def test_datetime_start_with_date_only_end_over_the_api_limit_raises(self, loader, fake_httpx):
+        # One more whole day than the limit is refused, as the api does.
+        with pytest.raises(ValueError, match='covers 367 days'):
+            loader.getDailyDataV2('2025-09-03T12:00:00Z', '2026-09-05', uid_list=['uid-aaa'])
+        assert fake_httpx.calls == []
+
+    def test_invalid_date_only_value_raises(self, loader, fake_httpx):
+        # A YYYY-MM-DD shaped value that is not a real date raises naming the argument.
+        with pytest.raises(ValueError, match='end_datetime'):
+            loader.getDailyDataV2('2026-09-03', '2026-02-30', uid_list=['uid-aaa'])
+        assert fake_httpx.calls == []
 
     def test_invalid_datetime_raises(self, loader, fake_httpx):
         # An unreadable datetime raises before any request is made.
@@ -660,3 +774,19 @@ class TestFetchV2Data:
         fake_httpx.route('*', FakeResponse(make_daily_info_rows()))
         df = loader._fetch_v2_data(loader.url, self.params(), ['uid-aaa'], True, 60.0)
         assert df.index.name == 'local_time'
+
+
+class TestFormatSpan:
+    def test_plural_units_are_joined(self):
+        # Every non-zero unit is listed with a plural suffix when it is not 1.
+        span = pd.Timedelta(days=366, hours=12, minutes=30, seconds=5)
+        assert _format_span(span) == '366 days 12 hours 30 minutes 5 seconds'
+
+    def test_singular_units_have_no_suffix(self):
+        # A unit whose value is 1 is written in the singular.
+        span = pd.Timedelta(days=1, hours=1, minutes=1, seconds=1)
+        assert _format_span(span) == '1 day 1 hour 1 minute 1 second'
+
+    def test_zero_units_are_left_out(self):
+        # Units that are zero do not appear in the text.
+        assert _format_span(pd.Timedelta(days=366, hours=1)) == '366 days 1 hour'
