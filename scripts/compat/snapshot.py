@@ -11,6 +11,11 @@ With credentials in the environment or a .env file (SOXAI_API_TOKEN and SOXAI_UI
 read the same way as the integration tests) the live cases fetch real data as well,
 from SOXAI_API_URL when it is set.
 
+The live cases write real health data of that uid to the output file, and
+run_compat_check.sh leaves it under .compat/ together with the reports that quote it.
+Do not share or commit those files, and delete .compat/ once the comparison is done.
+Pass --no-live when real data is not needed.
+
 usage:
     python scripts/compat/snapshot.py --out snapshot.json [--no-live]
 """
