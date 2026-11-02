@@ -269,9 +269,19 @@ def frozen_now(monkeypatch):
             """
             return fixed.tz_convert(tz) if tz is not None else fixed.tz_localize(None)
 
+    class PandasWithFrozenNow:
+        """pandas as seen by soxai_data, with only Timestamp swapped."""
+
+        Timestamp = FrozenTimestamp
+
+        def __getattr__(self, name):
+            return getattr(pd, name)
+
     from soxai_data import soxai_data as module
 
-    monkeypatch.setattr(module.pd, 'Timestamp', FrozenTimestamp)
+    # swap the pandas the module sees instead of pandas.Timestamp itself, so that pandas
+    # internals and the tests keep the real Timestamp
+    monkeypatch.setattr(module, 'pd', PandasWithFrozenNow())
     return fixed
 
 
